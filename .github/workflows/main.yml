@@ -23,21 +23,31 @@ jobs:
           path: microros_ws/src
           key: ${{ runner.os }}-microros-src-humble
 
-      # 3. 准备工作区并获取所有 micro-ROS 源码 (仅在没有缓存时运行)
+      # 3. 创建工作区目录 (为 'working-directory' 准备)
+      - name: Create Workspace Directory
+        run: mkdir -p microros_ws
+
+      # 4. 准备工作区并获取所有 micro-ROS 源码 (仅在没有缓存时运行)
       - name: Get micro-ROS Source Code
         if: steps.cache-microros-src.outputs.cache-hit != 'true'
+        # 使用 working-directory 选项来确保所有命令都在正确的上下文中执行
+        working-directory: ./microros_ws
         run: |
-          mkdir -p microros_ws/src
-          # 直接将仓库克隆到完整的最终路径
-          git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git microros_ws/src/micro_ros_setup
-          # 使用完整的相对路径和 --input 参数来执行导入，避免歧义
-          vcs import microros_ws/src --input microros_ws/src/micro_ros_setup/micro_ros_setup/sources/humble.repos
-
-      # 4. 创建工具链文件并开始编译
-      - name: Build micro-ROS Static Library
-        run: |
-          cd microros_ws
+          mkdir -p src
+          git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
           
+          # 调试步骤：验证文件是否存在
+          echo "--- Verifying cloned files exist ---"
+          ls -l src/micro_ros_setup/micro_ros_setup/sources/
+          echo "------------------------------------"
+
+          vcs import src < src/micro_ros_setup/micro_ros_setup/sources/humble.repos
+
+      # 5. 创建工具链文件并开始编译
+      - name: Build micro-ROS Static Library
+        # 注意：这里的 working-directory 同样重要
+        working-directory: ./microros_ws
+        run: |
           # 创建 CMake 工具链文件
           echo '# Set the target system
           set(CMAKE_SYSTEM_NAME Generic)
@@ -62,7 +72,7 @@ jobs:
             --packages-up-to micro_ros_static_library_builder \
             --cmake-args "-DCMAKE_TOOLCHAIN_FILE=$(pwd)/toolchain.cmake"
 
-      # 5. 查找并移动产物
+      # 6. 查找并移动产物
       - name: Find and Move Artifacts
         run: |
           echo "Searching for libmicroros.a..."
@@ -80,7 +90,7 @@ jobs:
             echo "✅ Copied include files from microros_ws/install/include/"
           fi
           
-      # 6. 上传产物
+      # 7. 上传产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
