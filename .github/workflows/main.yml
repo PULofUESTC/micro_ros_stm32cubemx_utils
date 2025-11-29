@@ -1,11 +1,10 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v17 (最终技术修正版) 通过添加 -DRCUTILS_USE_CUSTOM_CLOCK=ON 标志，
-#       解决了在交叉编译 rcutils 包时，构建系统错误地使用需要 POSIX 支持的
-#       time_unix.c 文件的问题。此标志会指示 rcutils 使用一个不依赖于
-#       特定操作系统的通用时钟实现，从而绕过了对 clock_gettime 和
-#       CLOCK_MONOTONIC 的依赖，这是成功为裸机平台编译的核心。
+# 描述: v18 (命名优化版) 在 v17 的成功技术方案基础上，修改了工作流的显示名称和
+#       最终生成的构件 (Artifact) 文件名，使其明确标识为 "Cortex-M4 Hard-Float"
+#       版本，方便用户识别和下载。
 
-name: Build micro-ROS From Source (Final Technical Fix v17)
+# 【v18 变更】修改工作流的显示名称，使其在 GitHub Actions 界面更清晰
+name: Build micro-ROS for Cortex-M4 Hard-Float
 
 on:
   workflow_dispatch:
@@ -40,7 +39,6 @@ jobs:
 
           git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
           
-          # Optimized rosdep initialization
           if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
             sudo rosdep init
           fi
@@ -54,13 +52,10 @@ jobs:
 
           ros2 run micro_ros_setup create_firmware_ws.sh generate_lib
           
-          # This step is often problematic in CI and might not be strictly necessary for library generation
-          # If it fails, consider commenting it out.
           rosdep install --from-paths src --ignore-src -y --skip-keys="micro_ros_msgs" || echo "rosdep install failed but continuing build..."
           echo "::endgroup::"
           
-          echo "::group::3. Configure and Build Firmware with Custom Clock"
-          # 1. 创建工具链文件 (保持不变)
+          echo "::group::3. Configure and Build Firmware for Cortex-M4 Hard-Float"
           TOOLCHAIN_FILENAME="stm32_hardfloat.cmake"
           TOOLCHAIN_PATH="${PWD}/firmware/${TOOLCHAIN_FILENAME}" 
           echo "ℹ️ Creating toolchain file: ${TOOLCHAIN_PATH}"
@@ -80,12 +75,10 @@ jobs:
           cat ${TOOLCHAIN_PATH}
           echo "--------------------------------"
 
-          # 2. 进入正确的 colcon 工作空间目录 (firmware/mcu_ws)
           cd firmware/mcu_ws
 
           echo "✅ Changed directory to $(pwd), which contains the 'src' folder for colcon."
 
-          # 3. 【v17 变更】调用 colcon build，并添加自定义时钟标志
           echo "🚀 Starting the build process with custom clock enabled..."
           colcon build \
             --merge-install \
@@ -105,9 +98,6 @@ jobs:
           LIB_PATH=$(find firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
           if [ -z "$LIB_PATH" ]; then
             echo "❌ FATAL: libmicroros.a was NOT found after build."
-            echo "--- This likely means the colcon build command failed. Please check the logs above. ---"
-            echo "--- Listing the build directory for debugging ---"
-            ls -R firmware/mcu_ws/build
             exit 1
           else
             echo "✅ SUCCESS! Found library at: $LIB_PATH"
@@ -116,12 +106,13 @@ jobs:
             mkdir -p export/include
             cp microros_ws/$LIB_PATH export/lib/
             cp -r microros_ws/firmware/mcu_ws/install/include/* export/include/
-            echo "✅ Artifacts copied to export/ directory for upload."
+            echo "✅ Artifacts for Cortex-M4 Hard-Float build are ready for upload."
           fi
           echo "::endgroup::"
 
-      - name: Upload Library Artifact
+      # 【v18 变更】修改上传构件的名称，使其在下载时清晰可辨
+      - name: Upload Cortex-M4 Hard-Float Library Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libmicroros_hard_float_from_source
+          name: libmicroros-cortex-m4-hard-float
           path: export/
