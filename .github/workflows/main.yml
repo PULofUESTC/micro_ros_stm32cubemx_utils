@@ -1,8 +1,7 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: 一个使用官方脚本从源码编译 micro-ROS 静态库的 GitHub Actions 工作流。
-# 这个版本是最稳定和推荐的版本，因为它利用了 micro-ROS 自己的工具来处理复杂的依赖和编译步骤。
+# 描述: 最终修正版的工作流。增加了安装 ROS 2 的步骤，解决了 "setup.bash not found" 的问题。
 
-name: Build micro-ROS From Source (Official Script Method)
+name: Build micro-ROS From Source (Final Corrected Version)
 
 on: 
   # 允许在 GitHub Actions 页面手动触发此工作流
@@ -16,13 +15,20 @@ jobs:
     steps:
       # 步骤 1: 安装编译所需的核心依赖
       # 包括 git, cmake, python, pip, vcstool 和 ARM 交叉编译工具链
-      - name: Install Dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y git cmake python3-pip gcc-arm-none-eabi
           pip3 install -U colcon-common-extensions vcstool
 
-      # 步骤 2: 缓存 micro-ROS 的源码目录
+      # 步骤 2: 安装 ROS 2 Humble
+      # 这是关键的修正步骤！它会下载并设置 ROS 2 环境。
+      - name: Set up ROS 2 Humble
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: humble
+
+      # 步骤 3: 缓存 micro-ROS 的源码目录
       # 如果源码已下载，后续运行会直接使用缓存，大大加快流程
       - name: Cache micro-ROS source code
         id: cache-microros-src
@@ -31,20 +37,17 @@ jobs:
           path: microros_ws/src
           key: ${{ runner.os }}-microros-src-humble
 
-      # 步骤 3: 使用官方脚本创建、编译并打包 micro-ROS
-      # 这是核心步骤，将所有相关操作放在一个脚本中执行，以保证环境的一致性。
-      - name: Create, Build and Package micro-ROS using official scripts
+      # 步骤 4: 使用官方脚本创建、编译并打包 micro-ROS
+      # 现在，此步骤中的 `source /opt/ros/humble/setup.bash` 将会成功执行。
+      - name: Create, Build and Package micro-ROS
         run: |
           # --- 第 1 部分：准备源码 ---
           echo "::group::Preparing micro-ROS source code"
-          # 创建工作区并进入该目录
           mkdir -p microros_ws
           cd microros_ws
           
-          # 仅在缓存未命中（即 src 目录不存在）时，才下载 setup 工具仓库
           if [ ! -d "src" ]; then
             echo "Cache miss. Cloning setup repository..."
-            # 注意：这里只克隆 setup 工具仓库，后续的源码由脚本自动拉取
             git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
           else
             echo "Cache hit. Skipping setup repository clone."
@@ -53,10 +56,10 @@ jobs:
 
           # --- 第 2 部分：创建固件工作区并编译 ---
           echo "::group::Create firmware workspace and build"
-          # 激活 ROS 2 (humble) 的环境，这是运行后续 ROS 2 命令所必需的
+          # 激活 ROS 2 环境 (现在这个文件肯定存在了)
           source /opt/ros/humble/setup.bash
           
-          # 创建一个 CMake 工具链文件，用于指定交叉编译参数
+          # 创建 CMake 工具链文件
           echo '# Set the target system
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -72,14 +75,11 @@ jobs:
           ' > toolchain.cmake
           
           # 执行官方脚本来创建和编译工作区
-          # 这个脚本会自动处理 vcs import 拉取所有源码和 colcon build 编译
           ros2 run micro_ros_setup create_firmware_ws.sh generate_lib --toolchain-file $(pwd)/toolchain.cmake
           echo "::endgroup::"
 
           # --- 第 3 部分：打包产物 ---
-          # 官方脚本已经完成了编译，产物会放在一个名为 'firmware' 的子目录中
           echo "::group::Packaging artifacts"
-          echo "Searching for the static library libmicroros.a..."
           LIB_PATH=$(find firmware/build/libmicroros.a | head -n 1)
           if [ -z "$LIB_PATH" ]; then
             echo "❌ Error: libmicroros.a was NOT found after build. Build failed."
@@ -88,19 +88,16 @@ jobs:
             exit 1
           else
             echo "✅ Found library at: $LIB_PATH"
-            # 返回到工作流的根目录，以创建用于上传的 export 文件夹
             cd .. 
             mkdir -p export/lib
             mkdir -p export/include
-            # 复制库文件和所有头文件到 export 目录
             cp microros_ws/$LIB_PATH export/lib/
             cp -r microros_ws/firmware/build/include/* export/include/
             echo "✅ Copied artifacts to export/ directory for upload."
           fi
           echo "::endgroup::"
 
-      # 步骤 4: 上传编译产物
-      # 将包含库文件和头文件的 export 目录打包成一个 artifact，以便在工作流结束后下载
+      # 步骤 5: 上传编译产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
