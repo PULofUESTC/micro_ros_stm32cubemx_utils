@@ -7,39 +7,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 检出代码 (明确指定 humble 分支)
-      - name: Checkout repository
+      # 1. [关键修改] 检出官方仓库的代码，而不是你的 Fork
+      # 这样保证一定有 humble 分支和构建脚本
+      - name: Checkout Official Repository
         uses: actions/checkout@v4
         with:
+          repository: micro-ROS/micro_ros_stm32cubemx_utils
           ref: humble
 
-      # 2. 运行编译 (使用独立的输出目录)
+      # 2. 运行 Docker 编译
+      # 注意：我们将当前下载下来的代码挂载进 Docker
+      # Docker 会读取其中的 library_generation.sh 脚本开始工作
       - name: Build libmicroros.a using Docker
         run: |
-          # 创建一个干净的专用输出目录
-          mkdir -p build_output
-          chmod 777 build_output
+          # 赋予脚本执行权限 (防止 permission denied)
+          chmod -R +x microros_static_library_ide/library_generation
 
           # 运行 Docker
-          # 注意：我们将 build_output 挂载到容器的 /project/microros_static_library
-          # 这样容器生成的所有文件都会出现在 build_output 里
-          sudo docker run --rm -v $(pwd)/build_output:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
+          # 这里的 $(pwd) 指向刚刚下载的官方代码目录
+          docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
 
-          # 修复文件权限 (Docker生成的文件是root权限，改为当前用户以便上传)
-          sudo chown -R $USER:$USER build_output
+          # 修复生成文件的权限 (方便后续上传)
+          sudo chown -R $USER:$USER microros_static_library_ide
 
-      # 3. [调试步骤] 列出文件结构
-      # 如果上传失败，查看这一步的日志就能知道文件到底在哪
-      - name: Debug - List Generated Files
+      # 3. [调试] 检查文件是否生成
+      - name: Check Generated Files
         run: |
-          echo "=== Content of build_output ==="
-          ls -R build_output
+          ls -l microros_static_library_ide/lib/microros/
 
-      # 4. 上传产物 (路径已更新为 build_output)
+      # 4. 上传产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
           name: libmicroros_hard_float
           path: |
-            build_output/lib/microros/libmicroros.a
-            build_output/lib/microros/include/
+            microros_static_library_ide/lib/microros/libmicroros.a
+            microros_static_library_ide/lib/microros/include/
