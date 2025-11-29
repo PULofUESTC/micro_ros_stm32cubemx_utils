@@ -1,7 +1,7 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: 最终验证版 v2。增加了对 rosdep init 错误的健壮性处理。
+# 描述: 最终修复版。修正了 build_firmware.sh 的参数传递方式，确保交叉编译配置被正确识别。
 
-name: Build micro-ROS From Source (Validated Final Version v2)
+name: Build micro-ROS From Source (Final Fix)
 
 on:
   workflow_dispatch:
@@ -49,6 +49,7 @@ jobs:
           echo "::endgroup::"
           
           echo "::group::3. Create toolchain and build the firmware library"
+          # 创建交叉编译工具链文件
           echo '# Set the target system for ARM Cortex-M4
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -61,7 +62,10 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > toolchain.cmake
 
-          ros2 run micro_ros_setup build_firmware.sh libmicroros.cmake $(pwd)/toolchain.cmake
+          # --- 【关键修正】 ---
+          # 明确地将工具链文件作为 CMake 参数传递，以避免解析错误。
+          # 这是解决 "Could not find toolchain file: libmicroros.cmake" 问题的核心。
+          ros2 run micro_ros_setup build_firmware.sh libmicroros.cmake --cmake-args -DCMAKE_TOOLCHAIN_FILE=$(pwd)/toolchain.cmake
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
