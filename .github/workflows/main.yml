@@ -1,38 +1,47 @@
 # 文件名: .github/workflows/build-microros.yml
-name: Build micro-ROS Static Library (F405 Hard-Float)
+name: Build micro-ROS Static Library (F405 Hard-Float - FINAL)
+
 on: 
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 检出官方仓库 (确保有构建脚本)
+      # 1. 检出仓库
       - name: Checkout Official Repository
         uses: actions/checkout@v4
         with:
           repository: micro-ROS/micro_ros_stm32cubemx_utils
-          # 注意：仓库分支仍然是 humble，我们只改变构建工具的版本
           ref: humble
-      # 2. 准备环境 & 强制创建目录
+
+      # 2. 准备工作区
       - name: Prepare Workspace
         run: |
           mkdir -p microros_static_library_ide/lib/microros
           chmod -R 777 microros_static_library_ide
-      # 3. [核心修改] 运行 Docker 编译
-      # 我们将构建镜像从 :humble 切换到 :foxy，这是一个更稳定且被广泛验证的版本。
-      # foxy 版本的构建脚本对 -f hard 参数的处理可能更可靠。
-      - name: Build libmicroros.a using Docker (Foxy Toolchain)
+
+      # 3. [核心修改] 运行 Docker 编译，并强制注入最精确的编译标志
+      # 我们不再依赖 -t 和 -f 参数，而是通过 EXTRA_CMAKE_ARGS 直接告诉编译器
+      # 目标是 Cortex-M4，并且必须使用硬浮点 ABI。
+      - name: Build libmicroros.a with Forced Compiler Flags
         run: |
-          echo "Starting Docker build with Foxy toolchain..."
-          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library \
-            microros/micro_ros_static_library_builder:foxy \
-            -d -t cortex_m4 -f hard -p host
-      # 4. 动态查找并移动产物 (你的优秀代码，无需改动)
+          # 定义针对 Cortex-M4 硬浮点的精确 GCC 参数
+          HARD_FLOAT_FLAGS="-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16"
+          
+          echo "Starting Docker build with forced hard-float flags for Cortex-M4..."
+          sudo docker run --rm \
+            -v $(pwd)/microros_static_library_ide:/project/microros_static_library \
+            -e "EXTRA_CMAKE_ARGS=-DCMAKE_C_FLAGS='${HARD_FLOAT_FLAGS}' -DCMAKE_CXX_FLAGS='${HARD_FLOAT_FLAGS}'" \
+            microros/micro_ros_static_library_builder:humble \
+            -d -p host
+            # 注意：我们已经完全移除了 -t 和 -f 参数，因为它们不可靠。
+
+      # 4. 查找并移动产物
       - name: Find and Move Artifacts
         run: |
           echo "Searching for libmicroros.a..."
           LIB_PATH=$(find . -name "libmicroros.a" | head -n 1)
-          
           if [ -z "$LIB_PATH" ]; then
             echo "❌ Error: libmicroros.a was NOT found. Build failed."
             ls -R
@@ -41,18 +50,17 @@ jobs:
             echo "✅ Found library at: $LIB_PATH"
             mkdir -p export/lib
             mkdir -p export/include
-            
             cp "$LIB_PATH" export/lib/
-            
             INC_PATH=$(find . -type d -name "include" | grep "microros" | head -n 1)
             if [ ! -z "$INC_PATH" ]; then
                cp -r "$INC_PATH"/* export/include/
                echo "✅ Found include files at: $INC_PATH"
             fi
           fi
-      # 5. 上传产物 (无需改动)
+
+      # 5. 上传产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libmicroros_hard_float_foxy
+          name: libmicroros_hard_float_forced_final
           path: export/
