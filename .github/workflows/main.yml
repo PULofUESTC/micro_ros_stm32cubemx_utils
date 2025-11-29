@@ -1,8 +1,7 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: 最终修正版 v2。移除了 build_firmware.sh 调用中多余的 --cmake-args 标志，
-#       确保 CMake 参数被正确传递给 colcon。
+# 描述: 最终修正版 v3。根据 build_firmware.sh 的源代码，使用了绝对正确的参数顺序 (platform, meta_file, cmake_args)。
 
-name: Build micro-ROS From Source (Final Fix v2)
+name: Build micro-ROS From Source (Final Fix v3)
 
 on:
   workflow_dispatch:
@@ -61,10 +60,12 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > toolchain.cmake
 
-          # --- 【最终修正】 ---
-          # 直接在元文件名后跟上 CMake 参数，不使用多余的 `--cmake-args` 标志。
-          # 脚本 build_firmware.sh 会自动处理它。
-          ros2 run micro_ros_setup build_firmware.sh libmicroros.cmake -DCMAKE_TOOLCHAIN_FILE=$(pwd)/toolchain.cmake
+          # --- 【绝对最终修正】 ---
+          # 按照脚本源代码的真实要求，严格按顺序提供三个参数：
+          # 1. Platform: 'generate_lib'
+          # 2. Meta File: 'libmicroros.cmake'
+          # 3. CMake Args: '-DCMAKE_TOOLCHAIN_FILE=...'
+          ros2 run micro_ros_setup build_firmware.sh generate_lib libmicroros.cmake -DCMAKE_TOOLCHAIN_FILE=$(pwd)/toolchain.cmake
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
