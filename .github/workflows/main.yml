@@ -1,9 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v21 (物理移除版) 采用了最直接的手段解决顽固的编译问题。
-#       鉴于为 rcutils 设置的 -DRCUTILS_ENABLE_FILESYSTEM_UTILS=OFF 标志
-#       未能生效，此版本在执行 colcon build 之前，通过 rm 命令物理删除了
-#       导致问题的 a/firmware/mcu_ws/uros/rcutils/src/filesystem.c 文件。
-#       这是一种在嵌入式交叉编译中处理平台不兼容代码的可靠最终方案。
+# 描述: v22 (路径修正终极版) 解决了 v21 中 rm 命令因路径错误而失效的
+#       根本问题。通过分析编译器报错的绝对路径，发现 uros 源码仓库被直接
+#       放置在 mcu_ws 目录下，而非 mcu_ws/src/ 目录下。此版本修正了
+#       PROBLEM_FILE 的路径，并增加 ls -R 命令用于调试验证，确保能够
+#       精准地物理移除不兼容的 filesystem.c 文件，从而完成最终编译。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -65,9 +65,25 @@ jobs:
           ' > ${TOOLCHAIN_PATH}
           
           cd firmware/mcu_ws
-          echo "✅ Changed directory to $(pwd), which contains the 'src' folder for colcon."
+          echo "✅ Changed directory to $(pwd), which contains the source folders for colcon."
 
-          # 仍然保留 colcon.meta，因为它成功解决了 time_unix.c 的问题
+          # 【v22 变更】增加 ls -R 用于调试，并修正 PROBLEM_FILE 的路径
+          echo "🔍 Displaying directory structure of mcu_ws for debugging..."
+          ls -R
+          echo "------------------------------------"
+
+          # 修正后的路径，去掉了错误的 'src/' 前缀
+          PROBLEM_FILE="uros/rcutils/src/filesystem.c"
+          if [ -f "$PROBLEM_FILE" ]; then
+            echo "🔥 Applying surgical fix: Physically removing incompatible file: $PROBLEM_FILE"
+            rm "$PROBLEM_FILE"
+            echo "✅ File successfully removed."
+          else
+            echo "❌ CRITICAL: Incompatible file was not found at the expected path: $PROBLEM_FILE"
+            exit 1
+          fi
+
+          # colcon.meta 仍然需要，用于解决 time_unix.c 的问题
           META_FILE_PATH="${PWD}/colcon.meta"
           echo "ℹ️ Creating colcon meta file for precise configuration: ${META_FILE_PATH}"
           echo '{
@@ -86,15 +102,6 @@ jobs:
                   }
               }
           }' > ${META_FILE_PATH}
-
-          # 【v21 变更】物理移除导致问题的源文件
-          PROBLEM_FILE="src/uros/rcutils/src/filesystem.c"
-          if [ -f "$PROBLEM_FILE" ]; then
-            echo "🔥 Applying surgical fix: Physically removing incompatible file: $PROBLEM_FILE"
-            rm "$PROBLEM_FILE"
-          else
-            echo "ℹ️ Incompatible file not found, perhaps already removed or not downloaded."
-          fi
 
           echo "🚀 Starting the final build process..."
           colcon build \
@@ -128,4 +135,3 @@ jobs:
         with:
           name: libmicroros-cortex-m4-hard-float
           path: export/
-
