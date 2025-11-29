@@ -1,9 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v9 健壮性增强版。解决了 v8 中因 `grep` 未找到匹配项而导致工作流失败的问题。
-#       1. 增加了更详细的日志，在修改前后都打印脚本内容。
-#       2. 使用 'if grep -q' 结构进行更安全的验证，避免因 `set -e` 导致意外中止。
+# 描述: v10 最终正确方案。在深刻理解了工具的工作原理后，
+#       我们发现 build_firmware.sh 的第一个参数就是用来接收工具链文件的。
+#       我们不再需要修改脚本或设置环境变量，只需创建工具链文件并将其绝对路径作为参数传递即可。
 
-name: Build micro-ROS From Source (Final Fix v9 - Robust Verification)
+name: Build micro-ROS From Source (Final Fix v10 - The Correct Way)
 
 on:
   workflow_dispatch:
@@ -49,12 +49,13 @@ jobs:
           rosdep install --from-paths src --ignore-src -y
           echo "::endgroup::"
           
-          echo "::group::3. Modify script, Set Environment, and Build"
-          # --- 【v9 健壮性增强核心】 ---
+          echo "::group::3. Create Toolchain and Build with Correct Arguments"
+          # --- 【v10 返璞归真核心】 ---
 
-          # 1. 定义工具链文件的绝对路径
-          TOOLCHAIN_PATH="${PWD}/stm32_hardfloat.cmake"
-          echo "ℹ️ Toolchain file absolute path is set to: ${TOOLCHAIN_PATH}"
+          # 1. 定义工具链文件的名称和绝对路径
+          TOOLCHAIN_FILENAME="stm32_hardfloat.cmake"
+          TOOLCHAIN_PATH="${PWD}/${TOOLCHAIN_FILENAME}"
+          echo "ℹ️ Creating toolchain file at absolute path: ${TOOLCHAIN_PATH}"
 
           # 2. 创建工具链文件
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
@@ -68,42 +69,16 @@ jobs:
           set(CMAKE_ASM_FLAGS         "${TARGET_FLAGS}" CACHE INTERNAL "")
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
+
+          # 3. [诊断] 验证文件是否已成功创建
+          echo "--- Verifying Toolchain File ---"
+          ls -l ${TOOLCHAIN_PATH}
+          cat ${TOOLCHAIN_PATH}
+          echo "------------------------------"
           
-          # 3. 设置 COLCON_CMAKE_ARGS 环境变量
-          export COLCON_CMAKE_ARGS="--no-warn-unused-cli -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH}"
-          echo "✅ COLCON_CMAKE_ARGS has been set to: '${COLCON_CMAKE_ARGS}'"
-
-          # 4. 定义要修改的、位于 *安装目录* 的脚本的正确路径
-          BUILD_SCRIPT_PATH="install/micro_ros_setup/lib/micro_ros_setup/build_firmware.sh"
-          echo " targeting the *installed* script at: ${BUILD_SCRIPT_PATH}"
-
-          # 5. [诊断] 在修改前，打印脚本中 colcon build 命令附近的上下文
-          echo "--- Script content BEFORE modification ---"
-          grep -C 5 "colcon build" ${BUILD_SCRIPT_PATH}
-          echo "----------------------------------------"
-
-          # 6. [外科手术] 对 build_firmware.sh 脚本进行在線修改
-          sed -i 's|-DCMAKE_TOOLCHAIN_FILE=\${TOOLCHAIN_FILE_NAME}||g' ${BUILD_SCRIPT_PATH}
-
-          # 7. [诊断] 在修改后，再次打印脚本内容以供对比
-          echo "--- Script content AFTER modification ---"
-          # 使用 '|| true' 来确保即使 grep 找不到匹配项，脚本也不会因此失败
-          grep -C 5 "colcon build" ${BUILD_SCRIPT_PATH} || true
-          echo "---------------------------------------"
-          
-          # 8. [健壮验证] 使用不会导致脚本失败的方式来验证修改是否成功
-          echo "--- Verifying script modification (Robust Check) ---"
-          if grep -q "CMAKE_TOOLCHAIN_FILE" ${BUILD_SCRIPT_PATH}; then
-            echo "❌ ERROR: The toolchain argument was NOT removed from the script."
-            exit 1
-          else
-            echo "✅ SUCCESS: The toolchain argument was successfully removed."
-          fi
-          echo "----------------------------------------------------"
-
-          # 9. 执行被我们修改过的脚本
-          echo "🚀 Starting the build process with the modified script..."
-          ros2 run micro_ros_setup build_firmware.sh stm32_hardfloat libmicroros.cmake
+          # 4. [正确用法] 将工具链文件的 *绝对路径* 作为第一个参数传递给脚本
+          echo "🚀 Starting the build process, passing the toolchain file path directly..."
+          ros2 run micro_ros_setup build_firmware.sh ${TOOLCHAIN_PATH} libmicroros.cmake
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
