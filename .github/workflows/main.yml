@@ -1,8 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v6 诊断加强版。在 v6 方案基础上增加详细的日志输出，
-#       用于验证文件创建、环境变量设置以及在失败时捕获底层的CMake错误日志。
+# 描述: v7 最终方案。通过 sed 命令对 build_firmware.sh 脚本进行在線修改，
+#       移除其内部写死的、导致错误的 CMAKE_TOOLCHAIN_FILE 参数，
+#       从而迫使 colcon 使用我们通过环境变量提供的正确配置。
 
-name: Build micro-ROS From Source (Final Fix v6 with Diagnostics)
+name: Build micro-ROS From Source (Final Fix v7 - Surgical Strike)
 
 on:
   workflow_dispatch:
@@ -48,10 +49,10 @@ jobs:
           rosdep install --from-paths src --ignore-src -y
           echo "::endgroup::"
           
-          echo "::group::3. Create Toolchain, Set Environment, and Build with Diagnostics"
-          # --- 【v6 诊断加强版核心】 ---
-          
-          # 1. 定义并验证工具链文件的绝对路径
+          echo "::group::3. Modify script, Set Environment, and Build"
+          # --- 【v7 最终方案核心】 ---
+
+          # 1. 定义工具链文件的绝对路径
           TOOLCHAIN_PATH="${PWD}/stm32_hardfloat.cmake"
           echo "ℹ️ Toolchain file absolute path is set to: ${TOOLCHAIN_PATH}"
 
@@ -68,45 +69,32 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
           
-          # 3. [诊断] 验证工具链文件是否成功创建及其内容
-          echo "--- Verifying Toolchain File ---"
-          ls -l ${TOOLCHAIN_PATH}
-          echo "--- Toolchain File Content ---"
-          cat ${TOOLCHAIN_PATH}
-          echo "------------------------------"
-
-          # 4. 设置并验证 COLCON_CMAKE_ARGS 环境变量
+          # 3. 设置 COLCON_CMAKE_ARGS 环境变量 (我们的期望配置)
           export COLCON_CMAKE_ARGS="--no-warn-unused-cli -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH}"
-          echo "ℹ️ Preparing to set COLCON_CMAKE_ARGS='${COLCON_CMAKE_ARGS}'"
-          
-          # 5. [诊断] 验证环境变量是否在当前环境中生效
-          echo "--- Verifying Environment Variable ---"
-          env | grep COLCON
-          echo "------------------------------------"
+          echo "✅ COLCON_CMAKE_ARGS has been set to: '${COLCON_CMAKE_ARGS}'"
 
-          # 6. 执行编译
-          echo "🚀 Starting the build process..."
+          # 4. [外科手术] 对 build_firmware.sh 脚本进行在線修改
+          BUILD_SCRIPT_PATH="src/micro_ros_setup/micro_ros_setup/verb/build_firmware.sh"
+          echo " surgically modifying the build script at ${BUILD_SCRIPT_PATH}"
+          # 这条命令会找到 "-DCMAKE_TOOLCHAIN_FILE=..." 这一整段参数，并把它替换为空字符串（即删除）
+          sed -i 's|-DCMAKE_TOOLCHAIN_FILE=\${TOOLCHAIN_FILE_NAME}||g' ${BUILD_SCRIPT_PATH}
+
+          # 5. [诊断] 打印修改后的脚本内容，确认修改成功
+          echo "--- Verifying script modification ---"
+          grep "colcon build" ${BUILD_SCRIPT_PATH}
+          echo "-------------------------------------"
+
+          # 6. 执行被我们修改过的脚本
+          echo "🚀 Starting the build process with the modified script..."
           ros2 run micro_ros_setup build_firmware.sh stm32_hardfloat libmicroros.cmake
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
-          # 使用 firmware/build 路径来查找库文件
           LIB_PATH=$(find firmware/build -name "libmicroros.a" | head -n 1)
           if [ -z "$LIB_PATH" ]; then
             echo "❌ FATAL: libmicroros.a was NOT found after build."
-            
-            # [诊断] 如果构建失败，尝试查找并打印 CMake 错误日志
             echo "--- Searching for CMakeError.log for post-mortem analysis ---"
-            CMAKE_ERROR_LOG=$(find firmware/build -name "CMakeError.log" | head -n 1)
-            if [ -n "$CMAKE_ERROR_LOG" ]; then
-              echo "Found CMake error log at: $CMAKE_ERROR_LOG"
-              echo "--- CMakeError.log Content ---"
-              cat "$CMAKE_ERROR_LOG"
-              echo "----------------------------"
-            else
-              echo "CMakeError.log not found."
-            fi
-            
+            find firmware/build -name "CMakeError.log" -exec echo "Found log at: {}" \; -exec cat {} \;
             echo "--- Listing the entire workspace for debugging ---"
             ls -R .
             exit 1
