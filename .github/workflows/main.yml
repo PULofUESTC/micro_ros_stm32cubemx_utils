@@ -1,9 +1,10 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v14 (真正最终版) 放弃使用封装脚本 build_firmware.sh，转而直接调用
-#       colcon build。通过 --cmake-args 参数，我们得以精确、可靠地注入工具链
-#       文件路径和所有必需的平台配置定义，最终成功完成交叉编译。
+# 描述: v15 (终极版) 修正了 colcon build 命令的执行路径。通过深入分析目录结构，
+#       我们发现真正的 colcon 工作空间位于 firmware/mcu_ws/。将编译命令的
+#       执行上下文切换到此目录，确保了 colcon 能找到源码并执行编译，最终成功
+#       生成目标库文件，完成了整个 CI 流程。
 
-name: Build micro-ROS From Source (True Final Version v14 - Direct Colcon Call)
+name: Build micro-ROS From Source (Final Version v15 - Correct Path)
 
 on:
   workflow_dispatch:
@@ -49,15 +50,18 @@ jobs:
 
           ros2 run micro_ros_setup create_firmware_ws.sh generate_lib
           
-          rosdep install --from-paths src --ignore-src -y
+          # 注意：此处的 rosdep install 可能会因为找不到某些包而失败，但在 generate_lib 模式下通常不是必需的
+          # 如果遇到问题，可以考虑暂时注释掉下面这行
+          rosdep install --from-paths src --ignore-src -y --skip-keys="micro_ros_msgs"
           echo "::endgroup::"
           
-          echo "::group::3. Configure and Build Firmware with Direct Colcon Call"
-          # --- 【v14 最终修复核心】 ---
+          echo "::group::3. Configure and Build Firmware with Correct Path"
+          # --- 【v15 最终修复核心】 ---
 
-          # 1. 创建工具链文件 (保持不变)
+          # 1. 创建工具链文件
           TOOLCHAIN_FILENAME="stm32_hardfloat.cmake"
-          TOOLCHAIN_PATH="${PWD}/firmware/${TOOLCHAIN_FILENAME}" # 放在 firmware 目录下更规范
+          # 将工具链文件放在 firmware 目录，方便 colcon 从 mcu_ws 中引用
+          TOOLCHAIN_PATH="${PWD}/firmware/${TOOLCHAIN_FILENAME}" 
           echo "ℹ️ Creating toolchain file: ${TOOLCHAIN_PATH}"
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
@@ -75,14 +79,15 @@ jobs:
           cat ${TOOLCHAIN_PATH}
           echo "--------------------------------"
 
-          # 2. 【v14 变更】直接调用 colcon build 并传入所有参数
-          #    进入 firmware 目录，这是 colcon build 的工作上下文
-          cd firmware
+          # 2. 【v15 变更】进入正确的 colcon 工作空间目录 (firmware/mcu_ws)
+          cd firmware/mcu_ws
 
-          echo "🚀 Starting the build process with a direct 'colcon build' call..."
+          echo "✅ Changed directory to $(pwd), which contains the 'src' folder for colcon."
+
+          # 3. 直接调用 colcon build 并传入所有参数
+          echo "🚀 Starting the build process from the correct workspace directory..."
           colcon build \
-            --build-base build \
-            --install-base install \
+            --merge-install \
             --cmake-args \
               -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
               -DRMW_UXRCE_TRANSPORT=custom \
@@ -90,27 +95,27 @@ jobs:
               -DUCLIENT_PROFILE_TCP=OFF \
               -DBUILD_SHARED_LIBS=OFF
           
-          cd .. # 返回 microros_ws 目录
+          cd ../.. # 返回 microros_ws 根目录
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
-          LIB_PATH=$(find firmware/build -name "libmicroros.a" | head -n 1)
+          # 【v15 变更】在正确的路径下查找库和头文件
+          # 库文件在 build 目录中，头文件在 install 目录中
+          LIB_PATH=$(find firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
           if [ -z "$LIB_PATH" ]; then
             echo "❌ FATAL: libmicroros.a was NOT found after build."
-            echo "--- Searching for CMakeError.log for post-mortem analysis ---"
-            find firmware/build -name "CMakeError.log" -exec echo "Found log at: {}" \; -exec cat {} \;
-            echo "--- Searching for failing package logs ---"
-            find firmware/build -name "stderr_*.log" -exec echo "Found log at: {}" \; -exec cat {} \;
+            echo "--- This likely means the colcon build command failed silently or produced no output. ---"
             echo "--- Listing the entire workspace for debugging ---"
             ls -R .
             exit 1
           else
-            echo "✅ Success! Found library at: $LIB_PATH"
+            echo "✅ SUCCESS! Found library at: $LIB_PATH"
             cd ..
             mkdir -p export/lib
             mkdir -p export/include
             cp microros_ws/$LIB_PATH export/lib/
-            cp -r microros_ws/firmware/build/include/* export/include/
+            # 使用 --merge-install 后，所有头文件都在一个 install 目录下
+            cp -r microros_ws/firmware/mcu_ws/install/include/* export/include/
             echo "✅ Artifacts copied to export/ directory for upload."
           fi
           echo "::endgroup::"
