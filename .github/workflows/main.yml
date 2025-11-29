@@ -1,5 +1,5 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: 最终修正版的工作流。增加了安装 ROS 2 的步骤，解决了 "setup.bash not found" 的问题。
+# 描述: 最终修正版，通过指定 ubuntu-22.04 解决了 OS 兼容性问题。
 
 name: Build micro-ROS From Source (Final Corrected Version)
 
@@ -9,27 +9,24 @@ on:
 
 jobs:
   build:
-    # 在最新的 Ubuntu 虚拟机环境中运行
-    runs-on: ubuntu-latest
+    # 关键修正：明确指定与 ROS 2 Humble 兼容的 Ubuntu 22.04
+    runs-on: ubuntu-22.04
 
     steps:
       # 步骤 1: 安装编译所需的核心依赖
-      # 包括 git, cmake, python, pip, vcstool 和 ARM 交叉编译工具链
       - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y git cmake python3-pip gcc-arm-none-eabi
           pip3 install -U colcon-common-extensions vcstool
 
-      # 步骤 2: 安装 ROS 2 Humble
-      # 这是关键的修正步骤！它会下载并设置 ROS 2 环境。
+      # 步骤 2: 安装 ROS 2 Humble (现在会在正确的 OS 上执行)
       - name: Set up ROS 2 Humble
         uses: ros-tooling/setup-ros@v0.7
         with:
           required-ros-distributions: humble
 
       # 步骤 3: 缓存 micro-ROS 的源码目录
-      # 如果源码已下载，后续运行会直接使用缓存，大大加快流程
       - name: Cache micro-ROS source code
         id: cache-microros-src
         uses: actions/cache@v4
@@ -38,7 +35,6 @@ jobs:
           key: ${{ runner.os }}-microros-src-humble
 
       # 步骤 4: 使用官方脚本创建、编译并打包 micro-ROS
-      # 现在，此步骤中的 `source /opt/ros/humble/setup.bash` 将会成功执行。
       - name: Create, Build and Package micro-ROS
         run: |
           # --- 第 1 部分：准备源码 ---
@@ -56,17 +52,13 @@ jobs:
 
           # --- 第 2 部分：创建固件工作区并编译 ---
           echo "::group::Create firmware workspace and build"
-          # 激活 ROS 2 环境 (现在这个文件肯定存在了)
           source /opt/ros/humble/setup.bash
           
-          # 创建 CMake 工具链文件
           echo '# Set the target system
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
-          # Specify the cross-compiler
           set(CMAKE_C_COMPILER arm-none-eabi-gcc)
           set(CMAKE_CXX_COMPILER arm-none-eabi-g++)
-          # Define the EXACT compiler flags for Cortex-M4 with hard-float
           set(TARGET_FLAGS "-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16")
           set(CMAKE_C_FLAGS           "${TARGET_FLAGS} -Wall -Wextra" CACHE INTERNAL "")
           set(CMAKE_CXX_FLAGS         "${TARGET_FLAGS} -Wall -Wextra -fno-exceptions" CACHE INTERNAL "")
@@ -74,7 +66,6 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > toolchain.cmake
           
-          # 执行官方脚本来创建和编译工作区
           ros2 run micro_ros_setup create_firmware_ws.sh generate_lib --toolchain-file $(pwd)/toolchain.cmake
           echo "::endgroup::"
 
@@ -103,3 +94,4 @@ jobs:
         with:
           name: libmicroros_hard_float_from_source
           path: export/
+
