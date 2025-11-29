@@ -1,72 +1,55 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: 最终完美版 v3。融合了所有修正，确保工具可用性和依赖完整性。
+# 描述: 最终验证版 v2。增加了对 rosdep init 错误的健壮性处理。
 
-name: Build micro-ROS From Source (Final Perfected Version v3)
+name: Build micro-ROS From Source (Validated Final Version v2)
 
 on:
-  # 允许在 GitHub Actions 页面手动触发此工作流
   workflow_dispatch:
 
 jobs:
   build:
-    # 明确指定与 ROS 2 Humble 兼容的 Ubuntu 22.04
     runs-on: ubuntu-22.04
 
     steps:
-      # 步骤 1: 安装核心系统依赖
       - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y git cmake python3-pip gcc-arm-none-eabi
           pip3 install -U colcon-common-extensions vcstool
 
-      # 步骤 2: 安装 ROS 2 Humble
       - name: Set up ROS 2 Humble
         uses: ros-tooling/setup-ros@v0.7
         with:
           required-ros-distributions: humble
 
-      # 步骤 3: 创建、编译并打包 micro-ROS (完整流程)
       - name: Create, Build and Package micro-ROS
         shell: bash
         run: |
-          # 激活基础 ROS 2 环境
           source /opt/ros/humble/setup.bash
 
-          # --- 第 1 部分：准备并构建 micro_ros_setup 工具 ---
-          echo "::group::Prepare and build micro_ros_setup tool"
+          echo "::group::1. Prepare and build the micro_ros_setup tool"
           mkdir -p microros_ws
           cd microros_ws
 
-          # 下载 setup 工具源码
           git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
           
-          # 初始化 rosdep
-          sudo rosdep init
+          # 健壮的 rosdep 初始化和更新
+          sudo rosdep init || echo "rosdep has already been initialized, continuing."
           rosdep update
           
-          # 为 setup 工具自身安装依赖
-          rosdep install --from-paths src --ignore-src -y
-          
-          # 编译 setup 工具，使其可以被 ros2 run 调用
           colcon build --packages-select micro_ros_setup
           echo "::endgroup::"
           
-          # --- 第 2 部分：下载固件源码并安装其依赖 ---
-          echo "::group::Download firmware sources and install dependencies"
-          # 关键：加载刚刚构建好的本地工作区环境
+          echo "::group::2. Download firmware sources and install their dependencies"
           source install/setup.bash
 
-          # 使用工具下载所有 micro-ROS 固件源码
           ros2 run micro_ros_setup create_firmware_ws.sh generate_lib
           
-          # 关键：为新下载的固件源码安装依赖
           rosdep install --from-paths src --ignore-src -y
           echo "::endgroup::"
           
-          # --- 第 3 部分：创建工具链文件并编译固件库 ---
-          echo "::group::Create toolchain and build firmware library"
-          echo '# Set the target system
+          echo "::group::3. Create toolchain and build the firmware library"
+          echo '# Set the target system for ARM Cortex-M4
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
           set(CMAKE_C_COMPILER arm-none-eabi-gcc)
@@ -78,33 +61,29 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > toolchain.cmake
 
-          # 使用专用脚本进行编译
           ros2 run micro_ros_setup build_firmware.sh libmicroros.cmake $(pwd)/toolchain.cmake
           echo "::endgroup::"
 
-          # --- 第 4 部分：打包产物 ---
-          echo "::group::Packaging artifacts"
+          echo "::group::4. Package the artifacts"
           LIB_PATH=$(find firmware/build/libmicroros.a | head -n 1)
           if [ -z "$LIB_PATH" ]; then
-            echo "❌ Error: libmicroros.a was NOT found after build. Build failed."
-            echo "Listing the entire workspace for debugging:"
+            echo "❌ FATAL: libmicroros.a was NOT found after build. The build process failed."
+            echo "Listing the entire workspace for debugging purposes:"
             ls -R .
             exit 1
           else
-            echo "✅ Found library at: $LIB_PATH"
+            echo "✅ Success! Found library at: $LIB_PATH"
             cd ..
             mkdir -p export/lib
             mkdir -p export/include
             cp microros_ws/$LIB_PATH export/lib/
             cp -r microros_ws/firmware/build/include/* export/include/
-            echo "✅ Copied artifacts to export/ directory for upload."
+            echo "✅ Artifacts copied to export/ directory for upload."
           fi
           echo "::endgroup::"
 
-      # 步骤 4: 上传编译产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
           name: libmicroros_hard_float_from_source
           path: export/
-
