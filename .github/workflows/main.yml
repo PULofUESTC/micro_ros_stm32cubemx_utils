@@ -15,13 +15,12 @@ jobs:
           repository: micro-ROS/micro_ros_stm32cubemx_utils
           ref: humble
 
-      # 2. 【核心配置】创建自定义平台配置文件
-      # 保留这一步是为了给 CMake 阶段提供双重保障
+      # 2. 创建自定义平台配置文件 (CMake Toolchain)
+      # 这一步依然保留，用于保障编译阶段的正确性
       - name: Create Custom Platform Definition
         run: |
           mkdir -p custom_platform
-           
-          # 创建 colcon.meta 文件，指向要构建的源码
+          
           echo '{
               "names": {
                   "micro_ros_common": {
@@ -32,16 +31,11 @@ jobs:
               }
           }' > custom_platform/colcon.meta
 
-          # 创建 toolchain.cmake 文件
           echo '# Set the target system
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
-
-          # Specify the cross-compiler
           set(CMAKE_C_COMPILER arm-none-eabi-gcc)
           set(CMAKE_CXX_COMPILER arm-none-eabi-g++)
-
-          # Define the EXACT compiler flags for Cortex-M4 with hard-float
           set(TARGET_FLAGS "-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16")
           set(CMAKE_C_FLAGS           "${TARGET_FLAGS} -Wall -Wextra" CACHE INTERNAL "")
           set(CMAKE_CXX_FLAGS         "${TARGET_FLAGS} -Wall -Wextra -fno-exceptions" CACHE INTERNAL "")
@@ -49,25 +43,46 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > custom_platform/toolchain.cmake
 
-      # 3. 【修复版】运行 Docker 编译
-      # 核心修复：通过 -e 强制注入环境变量，解决 library_generation.sh 识别为空的问题
+      # 3. 【绝对暴力修复】直接修改脚本源码
+      # 既然 Docker 环境变量传不进去，我们就直接把 export 写到脚本文件里！
+      # 我们利用 sed 命令，在 library_generation.sh 的第 2 行强行插入 export 语句。
+      - name: Patch Build Script (Force Inject Flags)
+        run: |
+          echo "💉 Injecting Hard-Float flags directly into the build script..."
+          
+          # 定义我们要强制注入的参数
+          FLAGS="-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16"
+          
+          # 目标脚本路径 (这是检出仓库里的文件)
+          SCRIPT_PATH="microros_static_library_ide/library_generation/library_generation.sh"
+          
+          # 检查文件是否存在
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "❌ Error: Script not found at $SCRIPT_PATH"
+            exit 1
+          fi
+
+          # 使用 sed 在第2行插入 export 语句
+          # 这样脚本运行时，必须使用我们定义的 CFLAGS
+          sed -i "2i export CFLAGS=\"$FLAGS\"" "$SCRIPT_PATH"
+          sed -i "2i export CXXFLAGS=\"$FLAGS\"" "$SCRIPT_PATH"
+          
+          echo "✅ Injection complete. Preview of the script top 5 lines:"
+          head -n 5 "$SCRIPT_PATH"
+
+      # 4. 运行 Docker 编译
+      # 注意：这里不需要 -e 了，因为参数已经写死在脚本文件里了
       - name: Build libmicroros.a with Custom Platform
         run: |
-          echo "Starting Docker build with FORCE injected Environment Variables..."
-          
-          # 定义参数：必须与 toolchain.cmake 中的保持一致
-          export TARGET_FLAGS="-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16"
-          
+          echo "Starting Docker build..."
           sudo docker run --rm \
-            -e CFLAGS="$TARGET_FLAGS" \
-            -e CXXFLAGS="$TARGET_FLAGS" \
             -v $(pwd)/microros_static_library_ide:/project/microros_static_library \
             -v $(pwd)/custom_platform:/project/custom_platform \
             microros/micro_ros_static_library_builder:humble \
             --metas /project/custom_platform/colcon.meta \
             --cmake-args "-DCMAKE_TOOLCHAIN_FILE=/project/custom_platform/toolchain.cmake"
 
-      # 4. 查找并移动产物
+      # 5. 查找并移动产物
       - name: Find and Move Artifacts
         run: |
           echo "Searching for libmicroros.a..."
@@ -88,7 +103,7 @@ jobs:
             fi
           fi
 
-      # 5. 上传产物
+      # 6. 上传产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
