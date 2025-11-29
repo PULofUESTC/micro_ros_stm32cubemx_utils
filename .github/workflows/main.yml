@@ -1,9 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v11 修复交叉编译链接错误。通过在工具链文件中添加 `--specs=nosys.specs` 标志，
-#       为裸机系统提供了 C 库所需的底层系统调用存根 (syscall stubs)，
-#       解决了 `undefined reference to \`_exit'\`` 的问题。
+# 描述: v12 解决平台功能缺失问题。通过设置特定的 CMake 定义，
+#       我们告诉 micro-ROS 构建系统我们的目标是裸机环境，
+#       从而禁用对文件系统等主机平台功能的依赖。
 
-name: Build micro-ROS From Source (Final Fix v11 - Syscall Stubs)
+name: Build micro-ROS From Source (Final Fix v12 - Platform Features)
 
 on:
   workflow_dispatch:
@@ -38,7 +38,6 @@ jobs:
 
           git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
           
-          # Retry rosdep init to handle potential network flakes
           for i in 1 2 3; do sudo rosdep init && break || sleep 5; done
           rosdep update
           
@@ -53,24 +52,19 @@ jobs:
           rosdep install --from-paths src --ignore-src -y
           echo "::endgroup::"
           
-          echo "::group::3. Create Toolchain and Build with Correct Arguments"
-          # --- 【v11 交叉编译链接修复核心】 ---
+          echo "::group::3. Configure Platform and Build Firmware"
+          # --- 【v12 平台特性配置核心】 ---
 
+          # 1. 创建工具链文件
           TOOLCHAIN_FILENAME="stm32_hardfloat.cmake"
           TOOLCHAIN_PATH="${PWD}/${TOOLCHAIN_FILENAME}"
           echo "ℹ️ Creating toolchain file at absolute path: ${TOOLCHAIN_PATH}"
-
-          # 2. 创建工具链文件。
-          #    【v11 变更】: 在 TARGET_FLAGS 中添加了 --specs=nosys.specs
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
           set(CMAKE_C_COMPILER arm-none-eabi-gcc)
           set(CMAKE_CXX_COMPILER arm-none-eabi-g++)
-          
-          # Define target-specific flags, including the crucial spec for syscall stubs
           set(TARGET_FLAGS "-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16 --specs=nosys.specs")
-          
           set(CMAKE_C_FLAGS           "${TARGET_FLAGS} -Wall -Wextra" CACHE INTERNAL "")
           set(CMAKE_CXX_FLAGS         "${TARGET_FLAGS} -Wall -Wextra -fno-exceptions" CACHE INTERNAL "")
           set(CMAKE_ASM_FLAGS         "${TARGET_FLAGS}" CACHE INTERNAL "")
@@ -78,20 +72,34 @@ jobs:
           ' > ${TOOLCHAIN_PATH}
 
           echo "--- Verifying Toolchain File ---"
-          ls -l ${TOOLCHAIN_PATH}
           cat ${TOOLCHAIN_PATH}
           echo "------------------------------"
           
-          echo "🚀 Starting the build process, passing the toolchain file path directly..."
+          # 2. 【v12 变更】设置 colcon 的 CMake 参数以配置 micro-ROS 平台特性
+          #    这会告诉 colcon 在构建时禁用文件系统、网络等裸机上不存在的功能
+          export COLCON_CMAKE_ARGS=" \
+            --no-warn-unused-cli \
+            -DRMW_UXRCE_TRANSPORT=custom \
+            -DUCLIENT_PROFILE_UDP=OFF \
+            -DUCLIENT_PROFILE_TCP=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+          "
+          echo "✅ COLCON_CMAKE_ARGS has been set for bare-metal configuration:"
+          echo "${COLCON_CMAKE_ARGS}"
+
+          # 3. 运行构建脚本，它会自动继承上面的环境变量，并将工具链文件作为参数
+          echo "🚀 Starting the build process with bare-metal platform configuration..."
           ros2 run micro_ros_setup build_firmware.sh ${TOOLCHAIN_PATH} libmicroros.cmake
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
           LIB_PATH=$(find firmware/build -name "libmicroros.a" | head -n 1)
           if [ -z "$LIB_PATH" ]; then
-            echo "❌ FATAL: libmicroros.a was NOT found after build."
+            echo "❌ FATAL: libmicros.a was NOT found after build."
             echo "--- Searching for CMakeError.log for post-mortem analysis ---"
             find firmware/build -name "CMakeError.log" -exec echo "Found log at: {}" \; -exec cat {} \;
+            echo "--- Searching for failing package logs ---"
+            find firmware/build -name "stderr_*.log" -exec echo "Found log at: {}" \; -exec cat {} \;
             echo "--- Listing the entire workspace for debugging ---"
             ls -R .
             exit 1
