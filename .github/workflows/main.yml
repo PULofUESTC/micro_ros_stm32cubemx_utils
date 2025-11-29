@@ -1,21 +1,35 @@
 name: Build micro-ROS Static Library (F405 Hard-Float)
 
-on: [workflow_dispatch] # 允许手动点击按钮触发
+on: 
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # 1. 检出代码 (强制指定 humble 分支结构)
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build libmicroros.a using Docker
-        # 这里直接运行 Docker，GitHub 服务器不需要代理，速度飞快
-        # 注意：已添加 -f hard 参数解决 VFP 错误
+      # 2. 准备目录 (防止 Docker 权限错误)
+      - name: Prepare directories
         run: |
           mkdir -p microros_static_library_ide/lib/microros
-          docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
+          chmod -R 777 microros_static_library_ide
 
+      # 3. 运行 Docker 编译
+      # 使用 sudo 运行以确保 Docker 有权限写入挂载卷
+      - name: Build libmicroros.a using Docker
+        run: |
+          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
+
+      # 4. 检查文件 (调试用)
+      - name: Check if file exists
+        run: |
+          ls -l microros_static_library_ide/lib/microros/
+          sudo chown -R $USER:$USER microros_static_library_ide
+
+      # 5. 上传产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
