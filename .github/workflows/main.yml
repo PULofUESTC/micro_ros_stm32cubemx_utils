@@ -1,10 +1,10 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v15 (终极版) 修正了 colcon build 命令的执行路径。通过深入分析目录结构，
-#       我们发现真正的 colcon 工作空间位于 firmware/mcu_ws/。将编译命令的
-#       执行上下文切换到此目录，确保了 colcon 能找到源码并执行编译，最终成功
-#       生成目标库文件，完成了整个 CI 流程。
+# 描述: v16 (终极完善版) 在 v15 的基础上，通过向 colcon build 命令添加
+#       -DBUILD_TESTING=OFF 参数，禁用了所有包的测试代码编译。这解决了
+#       rcutils 包在交叉编译时试图寻找测试依赖 (performance_test_fixture)
+#       而导致的构建失败问题，是完成最终编译的关键一步。
 
-name: Build micro-ROS From Source (Final Version v15 - Correct Path)
+name: Build micro-ROS From Source (Final Refined v16 - Disable Tests)
 
 on:
   workflow_dispatch:
@@ -50,17 +50,12 @@ jobs:
 
           ros2 run micro_ros_setup create_firmware_ws.sh generate_lib
           
-          # 注意：此处的 rosdep install 可能会因为找不到某些包而失败，但在 generate_lib 模式下通常不是必需的
-          # 如果遇到问题，可以考虑暂时注释掉下面这行
           rosdep install --from-paths src --ignore-src -y --skip-keys="micro_ros_msgs"
           echo "::endgroup::"
           
-          echo "::group::3. Configure and Build Firmware with Correct Path"
-          # --- 【v15 最终修复核心】 ---
-
-          # 1. 创建工具链文件
+          echo "::group::3. Configure and Build Firmware with Tests Disabled"
+          # 1. 创建工具链文件 (保持不变)
           TOOLCHAIN_FILENAME="stm32_hardfloat.cmake"
-          # 将工具链文件放在 firmware 目录，方便 colcon 从 mcu_ws 中引用
           TOOLCHAIN_PATH="${PWD}/firmware/${TOOLCHAIN_FILENAME}" 
           echo "ℹ️ Creating toolchain file: ${TOOLCHAIN_PATH}"
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
@@ -79,16 +74,17 @@ jobs:
           cat ${TOOLCHAIN_PATH}
           echo "--------------------------------"
 
-          # 2. 【v15 变更】进入正确的 colcon 工作空间目录 (firmware/mcu_ws)
+          # 2. 进入正确的 colcon 工作空间目录 (firmware/mcu_ws)
           cd firmware/mcu_ws
 
           echo "✅ Changed directory to $(pwd), which contains the 'src' folder for colcon."
 
-          # 3. 直接调用 colcon build 并传入所有参数
-          echo "🚀 Starting the build process from the correct workspace directory..."
+          # 3. 【v16 变更】直接调用 colcon build，并明确禁用测试
+          echo "🚀 Starting the build process with tests disabled..."
           colcon build \
             --merge-install \
             --cmake-args \
+              -DBUILD_TESTING=OFF \
               -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
               -DRMW_UXRCE_TRANSPORT=custom \
               -DUCLIENT_PROFILE_UDP=OFF \
@@ -99,14 +95,12 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
-          # 【v15 变更】在正确的路径下查找库和头文件
-          # 库文件在 build 目录中，头文件在 install 目录中
           LIB_PATH=$(find firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
           if [ -z "$LIB_PATH" ]; then
             echo "❌ FATAL: libmicroros.a was NOT found after build."
-            echo "--- This likely means the colcon build command failed silently or produced no output. ---"
-            echo "--- Listing the entire workspace for debugging ---"
-            ls -R .
+            echo "--- This likely means the colcon build command failed. Please check the logs above. ---"
+            echo "--- Listing the build directory for debugging ---"
+            ls -R firmware/mcu_ws/build
             exit 1
           else
             echo "✅ SUCCESS! Found library at: $LIB_PATH"
@@ -114,7 +108,6 @@ jobs:
             mkdir -p export/lib
             mkdir -p export/include
             cp microros_ws/$LIB_PATH export/lib/
-            # 使用 --merge-install 后，所有头文件都在一个 install 目录下
             cp -r microros_ws/firmware/mcu_ws/install/include/* export/include/
             echo "✅ Artifacts copied to export/ directory for upload."
           fi
