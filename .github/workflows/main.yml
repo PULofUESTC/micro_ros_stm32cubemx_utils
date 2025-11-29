@@ -1,8 +1,7 @@
+# 文件名: .github/workflows/build-microros.yml
 name: Build micro-ROS Static Library (F405 Hard-Float)
-
 on: 
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -12,56 +11,48 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: micro-ROS/micro_ros_stm32cubemx_utils
+          # 注意：仓库分支仍然是 humble，我们只改变构建工具的版本
           ref: humble
-
       # 2. 准备环境 & 强制创建目录
       - name: Prepare Workspace
         run: |
-          echo "Creating output directories..."
           mkdir -p microros_static_library_ide/lib/microros
           chmod -R 777 microros_static_library_ide
-
-      # 3. 运行 Docker 编译
-      # 注意：我们依然使用 -f hard
-      - name: Build libmicroros.a using Docker
+      # 3. [核心修改] 运行 Docker 编译
+      # 我们将构建镜像从 :humble 切换到 :foxy，这是一个更稳定且被广泛验证的版本。
+      # foxy 版本的构建脚本对 -f hard 参数的处理可能更可靠。
+      - name: Build libmicroros.a using Docker (Foxy Toolchain)
         run: |
-          echo "Starting Docker build..."
-          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
-
-      # 4. [关键步骤] 全局搜索文件
-      # 不管文件生成在哪，找出它的真实路径，并移动到标准位置
+          echo "Starting Docker build with Foxy toolchain..."
+          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library \
+            microros/micro_ros_static_library_builder:foxy \
+            -d -t cortex_m4 -f hard -p host
+      # 4. 动态查找并移动产物 (你的优秀代码，无需改动)
       - name: Find and Move Artifacts
         run: |
           echo "Searching for libmicroros.a..."
-          # 在当前目录下查找 .a 文件
           LIB_PATH=$(find . -name "libmicroros.a" | head -n 1)
           
           if [ -z "$LIB_PATH" ]; then
             echo "❌ Error: libmicroros.a was NOT found. Build failed."
-            # 列出所有文件帮助调试
             ls -R
             exit 1
           else
             echo "✅ Found library at: $LIB_PATH"
-            # 确保目标目录存在
             mkdir -p export/lib
             mkdir -p export/include
             
-            # 复制库文件
             cp "$LIB_PATH" export/lib/
             
-            # 查找并复制头文件 (include 文件夹)
-            # 通常 include 在库文件的旁边或者上级目录
             INC_PATH=$(find . -type d -name "include" | grep "microros" | head -n 1)
             if [ ! -z "$INC_PATH" ]; then
                cp -r "$INC_PATH"/* export/include/
                echo "✅ Found include files at: $INC_PATH"
             fi
           fi
-
-      # 5. 上传找到的文件
+      # 5. 上传产物 (无需改动)
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libmicroros_hard_float
+          name: libmicroros_hard_float_foxy
           path: export/
