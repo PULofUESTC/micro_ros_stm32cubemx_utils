@@ -7,39 +7,61 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. [关键修改] 检出官方仓库的代码，而不是你的 Fork
-      # 这样保证一定有 humble 分支和构建脚本
+      # 1. 检出官方仓库 (确保有构建脚本)
       - name: Checkout Official Repository
         uses: actions/checkout@v4
         with:
           repository: micro-ROS/micro_ros_stm32cubemx_utils
           ref: humble
 
-      # 2. 运行 Docker 编译
-      # 注意：我们将当前下载下来的代码挂载进 Docker
-      # Docker 会读取其中的 library_generation.sh 脚本开始工作
+      # 2. 准备环境 & 强制创建目录
+      - name: Prepare Workspace
+        run: |
+          echo "Creating output directories..."
+          mkdir -p microros_static_library_ide/lib/microros
+          chmod -R 777 microros_static_library_ide
+
+      # 3. 运行 Docker 编译
+      # 注意：我们依然使用 -f hard
       - name: Build libmicroros.a using Docker
         run: |
-          # 赋予脚本执行权限 (防止 permission denied)
-          chmod -R +x microros_static_library_ide/library_generation
+          echo "Starting Docker build..."
+          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
 
-          # 运行 Docker
-          # 这里的 $(pwd) 指向刚刚下载的官方代码目录
-          docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
-
-          # 修复生成文件的权限 (方便后续上传)
-          sudo chown -R $USER:$USER microros_static_library_ide
-
-      # 3. [调试] 检查文件是否生成
-      - name: Check Generated Files
+      # 4. [关键步骤] 全局搜索文件
+      # 不管文件生成在哪，找出它的真实路径，并移动到标准位置
+      - name: Find and Move Artifacts
         run: |
-          ls -l microros_static_library_ide/lib/microros/
+          echo "Searching for libmicroros.a..."
+          # 在当前目录下查找 .a 文件
+          LIB_PATH=$(find . -name "libmicroros.a" | head -n 1)
+          
+          if [ -z "$LIB_PATH" ]; then
+            echo "❌ Error: libmicroros.a was NOT found. Build failed."
+            # 列出所有文件帮助调试
+            ls -R
+            exit 1
+          else
+            echo "✅ Found library at: $LIB_PATH"
+            # 确保目标目录存在
+            mkdir -p export/lib
+            mkdir -p export/include
+            
+            # 复制库文件
+            cp "$LIB_PATH" export/lib/
+            
+            # 查找并复制头文件 (include 文件夹)
+            # 通常 include 在库文件的旁边或者上级目录
+            INC_PATH=$(find . -type d -name "include" | grep "microros" | head -n 1)
+            if [ ! -z "$INC_PATH" ]; then
+               cp -r "$INC_PATH"/* export/include/
+               echo "✅ Found include files at: $INC_PATH"
+            fi
+          fi
 
-      # 4. 上传产物
+      # 5. 上传找到的文件
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
           name: libmicroros_hard_float
-          path: |
-            microros_static_library_ide/lib/microros/libmicroros.a
-            microros_static_library_ide/lib/microros/include/
+          path: export/
