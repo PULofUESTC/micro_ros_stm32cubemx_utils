@@ -1,7 +1,7 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: 最终修正版 v4。基于对 build_firmware.sh 源代码的分析，采用脚本预期的标准方式提供自定义工具链。
+# 描述: 诊断版本 v5。增加 set -x 强制打印执行的命令，以揭示路径被剥离的根本原因。
 
-name: Build micro-ROS From Source (Final Fix v4)
+name: Build micro-ROS From Source (Diagnostic Fix v5)
 
 on:
   workflow_dispatch:
@@ -33,7 +33,6 @@ jobs:
 
           git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
           
-          # 偶尔出现rosdep连接问题，增加重试机制
           for i in 1 2 3; do sudo rosdep init && break || sleep 5; done
           rosdep update
           
@@ -49,15 +48,9 @@ jobs:
           echo "::endgroup::"
           
           echo "::group::3. Create custom toolchain and build the firmware library"
-          # --- 【最终修正的核心】 ---
-          # 1. 定义我们的自定义平台名称
           CUSTOM_PLATFORM_NAME="stm32_hardfloat"
-
-          # 2. 创建脚本期望的目录结构
           mkdir -p firmware/toolchain
           
-          # 3. 将我们的工具链内容写入到脚本期望的文件中
-          # 文件名必须是 <平台名>.cmake
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -70,13 +63,20 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > firmware/toolchain/${CUSTOM_PLATFORM_NAME}.cmake
           
-          echo "✅ Custom toolchain file created at: firmware/toolchain/${CUSTOM_PLATFORM_NAME}.cmake"
+          echo "✅ Custom toolchain file created at: $(pwd)/firmware/toolchain/${CUSTOM_PLATFORM_NAME}.cmake"
 
-          # 4. 使用正确的参数调用编译脚本
-          #    参数1: 我们的自定义平台名
-          #    参数2: 我们要构建的元文件 (libmicroros.cmake)
-          #    (不再需要第三个参数来指定工具链文件)
+          # --- 【诊断核心】 ---
+          # 1. 打印当前工作目录，确认路径
+          echo "ℹ️ Current working directory is: $(pwd)"
+          
+          # 2. 启用命令跟踪，这将打印出 ros2 run 实际执行的 colcon 命令
+          set -x
+          
+          # 3. 执行编译。现在我们能看到它背后到底发生了什么
           ros2 run micro_ros_setup build_firmware.sh ${CUSTOM_PLATFORM_NAME} libmicroros.cmake
+          
+          # 4. 关闭命令跟踪
+          set +x
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
