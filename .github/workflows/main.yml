@@ -1,116 +1,96 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: 一个用于从源码编译 micro-ROS 静态库的 GitHub Actions 工作流。
-# 这个版本经过优化，将核心逻辑合并到一个步骤中，以确保路径和环境的连续性。
-
-name: Build micro-ROS From Source (Optimized for GitHub Actions)
+name: Build micro-ROS Static Library (F405 Hard-Float - Ultimate)
 
 on: 
-  # 允许手动触发此工作流
   workflow_dispatch:
 
 jobs:
   build:
-    # 使用最新的 Ubuntu 虚拟机环境
     runs-on: ubuntu-latest
-
     steps:
-      # 步骤 1: 安装编译所需的核心依赖
-      # 包括 git, cmake, python, pip, vcstool 和 ARM 交叉编译工具链
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git cmake python3-pip gcc-arm-none-eabi
-          pip3 install -U colcon-common-extensions vcstool
-
-      # 步骤 2: 缓存 micro-ROS 的源码目录
-      # 如果源码已下载，后续运行会直接使用缓存，大大加快流程
-      - name: Cache micro-ROS source code
-        id: cache-microros-src
-        uses: actions/cache@v4
+      # 1. 检出官方仓库
+      - name: Checkout Official Repository
+        uses: actions/checkout@v4
         with:
-          path: microros_ws/src
-          key: ${{ runner.os }}-microros-src-humble
+          repository: micro-ROS/micro_ros_stm32cubemx_utils
+          ref: humble
 
-      # 步骤 3: 下载、编译并打包 micro-ROS
-      # 这是一个核心步骤，将所有相关操作放在一个脚本中执行，保证环境一致性
-      - name: Download, Build and Package micro-ROS
+      # 2. 【核心配置】创建自定义平台配置文件
+      # 保留这一步是为了给 CMake 阶段提供双重保障
+      - name: Create Custom Platform Definition
         run: |
-          # --- 第 1 部分：准备源码 ---
-          echo "::group::Preparing micro-ROS source code"
-          mkdir -p microros_ws
-          cd microros_ws
-          
-          # 仅在缓存未命中（即 src 目录不存在）时才下载源码
-          if [ ! -d "src" ]; then
-            echo "Cache miss. Cloning repositories..."
-            mkdir src
-            git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
-            
-            # 调试步骤：递归列出克隆下的目录，以验证文件结构
-            echo "--- Verifying cloned files exist ---"
-            ls -R src/micro_ros_setup
-            echo "------------------------------------"
-            
-            # 使用 vcs 工具导入所有依赖的 ROS 2 仓库
-            vcs import src < src/micro_ros_setup/micro_ros_setup/sources/humble.repos
-          else
-            echo "Cache hit. Skipping source code download."
-          fi
-          echo "::endgroup::"
-          
-          # --- 第 2 部分：编译 ---
-          echo "::group::Building micro-ROS static library"
-          # 创建一个 CMake 工具链文件，用于指定交叉编译参数
+          mkdir -p custom_platform
+           
+          # 创建 colcon.meta 文件，指向要构建的源码
+          echo '{
+              "names": {
+                  "micro_ros_common": {
+                      "type": "git",
+                      "url": "https://github.com/micro-ROS/micro_ros_common.git",
+                      "version": "humble"
+                  }
+              }
+          }' > custom_platform/colcon.meta
+
+          # 创建 toolchain.cmake 文件
           echo '# Set the target system
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
+
           # Specify the cross-compiler
           set(CMAKE_C_COMPILER arm-none-eabi-gcc)
           set(CMAKE_CXX_COMPILER arm-none-eabi-g++)
+
           # Define the EXACT compiler flags for Cortex-M4 with hard-float
           set(TARGET_FLAGS "-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16")
           set(CMAKE_C_FLAGS           "${TARGET_FLAGS} -Wall -Wextra" CACHE INTERNAL "")
           set(CMAKE_CXX_FLAGS         "${TARGET_FLAGS} -Wall -Wextra -fno-exceptions" CACHE INTERNAL "")
           set(CMAKE_ASM_FLAGS         "${TARGET_FLAGS}" CACHE INTERNAL "")
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
-          ' > toolchain.cmake
+          ' > custom_platform/toolchain.cmake
+
+      # 3. 【修复版】运行 Docker 编译
+      # 核心修复：通过 -e 强制注入环境变量，解决 library_generation.sh 识别为空的问题
+      - name: Build libmicroros.a with Custom Platform
+        run: |
+          echo "Starting Docker build with FORCE injected Environment Variables..."
           
-          # 激活 ROS 2 (humble) 的环境
-          source /opt/ros/humble/setup.bash
+          # 定义参数：必须与 toolchain.cmake 中的保持一致
+          export TARGET_FLAGS="-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16"
           
-          # 使用 colcon 工具进行编译，仅编译生成静态库所需的包
-          colcon build \
-            --merge-install \
-            --packages-up-to micro_ros_static_library_builder \
-            --cmake-args "-DCMAKE_TOOLCHAIN_FILE=$(pwd)/toolchain.cmake"
-          echo "::endgroup::"
-          
-          # --- 第 3 部分：打包产物 ---
-          echo "::group::Packaging artifacts"
-          echo "Searching for the static library libmicroros.a..."
-          LIB_PATH=$(find install/lib -name "libmicroros.a" | head -n 1)
+          sudo docker run --rm \
+            -e CFLAGS="$TARGET_FLAGS" \
+            -e CXXFLAGS="$TARGET_FLAGS" \
+            -v $(pwd)/microros_static_library_ide:/project/microros_static_library \
+            -v $(pwd)/custom_platform:/project/custom_platform \
+            microros/micro_ros_static_library_builder:humble \
+            --metas /project/custom_platform/colcon.meta \
+            --cmake-args "-DCMAKE_TOOLCHAIN_FILE=/project/custom_platform/toolchain.cmake"
+
+      # 4. 查找并移动产物
+      - name: Find and Move Artifacts
+        run: |
+          echo "Searching for libmicroros.a..."
+          LIB_PATH=$(find . -name "libmicroros.a" | head -n 1)
           if [ -z "$LIB_PATH" ]; then
-            echo "❌ Error: libmicroros.a was NOT found after build. Build failed."
-            echo "Listing the entire workspace for debugging:"
-            ls -R .
+            echo "❌ Error: libmicroros.a was NOT found. Build failed."
+            ls -R
             exit 1
           else
             echo "✅ Found library at: $LIB_PATH"
-            # 返回到工作流的根目录，以创建 export 文件夹
-            cd .. 
             mkdir -p export/lib
             mkdir -p export/include
-            # 复制库文件和所有头文件到 export 目录
-            cp microros_ws/$LIB_PATH export/lib/
-            cp -r microros_ws/install/include/* export/include/
-            echo "✅ Copied artifacts to export/ directory for upload."
+            cp "$LIB_PATH" export/lib/
+            INC_PATH=$(find . -type d -name "include" | grep "microros" | head -n 1)
+            if [ ! -z "$INC_PATH" ]; then
+                cp -r "$INC_PATH"/* export/include/
+                echo "✅ Found include files at: $INC_PATH"
+            fi
           fi
-          echo "::endgroup::"
 
-      # 步骤 4: 上传编译产物
-      # 将包含库文件和头文件的 export 目录打包成一个 artifact
+      # 5. 上传产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libmicroros_hard_float_from_source
+          name: libmicroros_hard_float_custom_platform
           path: export/
