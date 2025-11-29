@@ -1,9 +1,10 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v18 (命名优化版) 在 v17 的成功技术方案基础上，修改了工作流的显示名称和
-#       最终生成的构件 (Artifact) 文件名，使其明确标识为 "Cortex-M4 Hard-Float"
-#       版本，方便用户识别和下载。
+# 描述: v19 (精准配置版) 解决了 v17/v18 中 CMake 参数被忽略的根本问题。
+#       通过创建一个 colcon.meta 文件，我们将特定的编译参数（如 RCUTILS_USE_CUSTOM_CLOCK）
+#       精准地只应用到需要它们的包（如 rcutils），而不是全局广播。
+#       这 mimics 了 micro-ROS 官方工具的构建方式，是解决此类交叉编译问题的
+#       标准且健壮的做法。
 
-# 【v18 变更】修改工作流的显示名称，使其在 GitHub Actions 界面更清晰
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
 on:
@@ -36,28 +37,21 @@ jobs:
           echo "::group::1. Prepare and build the micro_ros_setup tool"
           mkdir -p microros_ws
           cd microros_ws
-
           git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
-          
-          if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
-            sudo rosdep init
-          fi
+          if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then sudo rosdep init; fi
           rosdep update
-          
           colcon build --packages-select micro_ros_setup
           echo "::endgroup::"
           
           echo "::group::2. Download firmware sources and install their dependencies"
           source install/setup.bash
-
           ros2 run micro_ros_setup create_firmware_ws.sh generate_lib
-          
           rosdep install --from-paths src --ignore-src -y --skip-keys="micro_ros_msgs" || echo "rosdep install failed but continuing build..."
           echo "::endgroup::"
           
-          echo "::group::3. Configure and Build Firmware for Cortex-M4 Hard-Float"
-          TOOLCHAIN_FILENAME="stm32_hardfloat.cmake"
-          TOOLCHAIN_PATH="${PWD}/firmware/${TOOLCHAIN_FILENAME}" 
+          echo "::group::3. Configure and Build Firmware with Precise Settings"
+          # 步骤 1: 创建工具链文件 (保持不变)
+          TOOLCHAIN_PATH="${PWD}/firmware/stm32_hardfloat.cmake" 
           echo "ℹ️ Creating toolchain file: ${TOOLCHAIN_PATH}"
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
@@ -71,25 +65,42 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
           
-          echo "--- Verifying Toolchain File ---"
-          cat ${TOOLCHAIN_PATH}
-          echo "--------------------------------"
-
+          # 进入 colcon 工作空间
           cd firmware/mcu_ws
-
           echo "✅ Changed directory to $(pwd), which contains the 'src' folder for colcon."
 
-          echo "🚀 Starting the build process with custom clock enabled..."
+          # 步骤 2: 【v19 变更】创建 colcon.meta 文件以应用包专属配置
+          META_FILE_PATH="${PWD}/colcon.meta"
+          echo "ℹ️ Creating colcon meta file for precise configuration: ${META_FILE_PATH}"
+          echo '{
+              "packages": {
+                  "rcutils": {
+                      "cmake-args": [
+                          "-DRCUTILS_USE_CUSTOM_CLOCK=ON"
+                      ]
+                  },
+                  "rmw_microxrcedds": {
+                      "cmake-args": [
+                          "-DRMW_UXRCE_TRANSPORT=custom",
+                          "-DUCLIENT_PROFILE_UDP=OFF",
+                          "-DUCLIENT_PROFILE_TCP=OFF"
+                      ]
+                  }
+              }
+          }' > ${META_FILE_PATH}
+
+          echo "--- Verifying colcon.meta File ---"
+          cat ${META_FILE_PATH}
+          echo "------------------------------------"
+
+          # 步骤 3: 【v19 变更】使用 colcon.meta 简化并修正 colcon build 命令
+          echo "🚀 Starting the build process using colcon.meta for configuration..."
           colcon build \
             --merge-install \
             --cmake-args \
               -DBUILD_TESTING=OFF \
-              -DRCUTILS_USE_CUSTOM_CLOCK=ON \
-              -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
-              -DRMW_UXRCE_TRANSPORT=custom \
-              -DUCLIENT_PROFILE_UDP=OFF \
-              -DUCLIENT_PROFILE_TCP=OFF \
-              -DBUILD_SHARED_LIBS=OFF
+              -DBUILD_SHARED_LIBS=OFF \
+              -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH}
           
           cd ../.. # 返回 microros_ws 根目录
           echo "::endgroup::"
@@ -110,7 +121,6 @@ jobs:
           fi
           echo "::endgroup::"
 
-      # 【v18 变更】修改上传构件的名称，使其在下载时清晰可辨
       - name: Upload Cortex-M4 Hard-Float Library Artifact
         uses: actions/upload-artifact@v4
         with:
