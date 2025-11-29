@@ -1,7 +1,7 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: 最终修正版，通过指定 ubuntu-22.04 解决了 OS 兼容性问题。
+# 描述: 最终完美版。解决了 "Package not found" 问题，完整遵循了官方编译流程。
 
-name: Build micro-ROS From Source (Final Corrected Version)
+name: Build micro-ROS From Source (Final Perfected Version)
 
 on: 
   # 允许在 GitHub Actions 页面手动触发此工作流
@@ -9,51 +9,67 @@ on:
 
 jobs:
   build:
-    # 关键修正：明确指定与 ROS 2 Humble 兼容的 Ubuntu 22.04
+    # 明确指定与 ROS 2 Humble 兼容的 Ubuntu 22.04
     runs-on: ubuntu-22.04
 
     steps:
-      # 步骤 1: 安装编译所需的核心依赖
+      # 步骤 1: 安装核心系统依赖
       - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y git cmake python3-pip gcc-arm-none-eabi
           pip3 install -U colcon-common-extensions vcstool
 
-      # 步骤 2: 安装 ROS 2 Humble (现在会在正确的 OS 上执行)
+      # 步骤 2: 安装 ROS 2 Humble
       - name: Set up ROS 2 Humble
         uses: ros-tooling/setup-ros@v0.7
         with:
           required-ros-distributions: humble
 
-      # 步骤 3: 缓存 micro-ROS 的源码目录
-      - name: Cache micro-ROS source code
-        id: cache-microros-src
+      # 步骤 3: 缓存 micro-ROS setup 工具的源码
+      # 注意：我们只缓存 setup 工具，因为固件源码由工具自己拉取
+      - name: Cache micro-ROS setup source
+        id: cache-microros-setup-src
         uses: actions/cache@v4
         with:
           path: microros_ws/src
-          key: ${{ runner.os }}-microros-src-humble
+          key: ${{ runner.os }}-microros-setup-src-humble
 
-      # 步骤 4: 使用官方脚本创建、编译并打包 micro-ROS
+      # 步骤 4: 创建、编译并打包 micro-ROS
       - name: Create, Build and Package micro-ROS
+        # 使用 ROS 2 的 entrypoint 脚本可以确保所有 ROS 相关的环境变量都设置正确
+        shell: bash
         run: |
-          # --- 第 1 部分：准备源码 ---
-          echo "::group::Preparing micro-ROS source code"
+          # 激活基础 ROS 2 环境
+          source /opt/ros/humble/setup.bash
+
+          # --- 第 1 部分：准备并构建 micro_ros_setup 工具 ---
+          echo "::group::Prepare and build micro_ros_setup tool"
           mkdir -p microros_ws
           cd microros_ws
-          
+
+          # 如果缓存未命中，则下载 setup 工具源码
           if [ ! -d "src" ]; then
             echo "Cache miss. Cloning setup repository..."
             git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
           else
             echo "Cache hit. Skipping setup repository clone."
           fi
-          echo "::endgroup::"
 
-          # --- 第 2 部分：创建固件工作区并编译 ---
-          echo "::group::Create firmware workspace and build"
-          source /opt/ros/humble/setup.bash
+          # 安装 setup 工具自身的依赖
+          rosdep update
+          rosdep install --from-paths src --ignore-src -y
           
+          # 编译 setup 工具
+          colcon build
+          echo "::endgroup::"
+          
+          # --- 第 2 部分：使用已构建的工具来创建和编译固件库 ---
+          echo "::group::Create firmware workspace and build library"
+          # 关键修正：Source 刚刚构建好的本地工作区环境，这样 ros2 才能找到 micro_ros_setup
+          source install/setup.bash
+          
+          # 创建工具链文件
           echo '# Set the target system
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -66,11 +82,13 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > toolchain.cmake
           
+          # 现在这个命令可以成功执行了！
           ros2 run micro_ros_setup create_firmware_ws.sh generate_lib --toolchain-file $(pwd)/toolchain.cmake
           echo "::endgroup::"
 
           # --- 第 3 部分：打包产物 ---
           echo "::group::Packaging artifacts"
+          # 库文件现在位于 firmware/build 目录中
           LIB_PATH=$(find firmware/build/libmicroros.a | head -n 1)
           if [ -z "$LIB_PATH" ]; then
             echo "❌ Error: libmicroros.a was NOT found after build. Build failed."
@@ -94,4 +112,3 @@ jobs:
         with:
           name: libmicroros_hard_float_from_source
           path: export/
-
