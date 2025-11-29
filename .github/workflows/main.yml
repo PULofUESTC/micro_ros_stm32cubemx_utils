@@ -1,9 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v10 最终正确方案。在深刻理解了工具的工作原理后，
-#       我们发现 build_firmware.sh 的第一个参数就是用来接收工具链文件的。
-#       我们不再需要修改脚本或设置环境变量，只需创建工具链文件并将其绝对路径作为参数传递即可。
+# 描述: v11 修复交叉编译链接错误。通过在工具链文件中添加 `--specs=nosys.specs` 标志，
+#       为裸机系统提供了 C 库所需的底层系统调用存根 (syscall stubs)，
+#       解决了 `undefined reference to \`_exit'\`` 的问题。
 
-name: Build micro-ROS From Source (Final Fix v10 - The Correct Way)
+name: Build micro-ROS From Source (Final Fix v11 - Syscall Stubs)
 
 on:
   workflow_dispatch:
@@ -17,6 +17,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git cmake python3-pip gcc-arm-none-eabi
+
+      - name: Install Python Dependencies
+        run: |
           pip3 install -U colcon-common-extensions vcstool
 
       - name: Set up ROS 2 Humble
@@ -35,6 +38,7 @@ jobs:
 
           git clone -b humble https://github.com/micro-ROS/micro_ros_setup.git src/micro_ros_setup
           
+          # Retry rosdep init to handle potential network flakes
           for i in 1 2 3; do sudo rosdep init && break || sleep 5; done
           rosdep update
           
@@ -50,33 +54,34 @@ jobs:
           echo "::endgroup::"
           
           echo "::group::3. Create Toolchain and Build with Correct Arguments"
-          # --- 【v10 返璞归真核心】 ---
+          # --- 【v11 交叉编译链接修复核心】 ---
 
-          # 1. 定义工具链文件的名称和绝对路径
           TOOLCHAIN_FILENAME="stm32_hardfloat.cmake"
           TOOLCHAIN_PATH="${PWD}/${TOOLCHAIN_FILENAME}"
           echo "ℹ️ Creating toolchain file at absolute path: ${TOOLCHAIN_PATH}"
 
-          # 2. 创建工具链文件
+          # 2. 创建工具链文件。
+          #    【v11 变更】: 在 TARGET_FLAGS 中添加了 --specs=nosys.specs
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
           set(CMAKE_C_COMPILER arm-none-eabi-gcc)
           set(CMAKE_CXX_COMPILER arm-none-eabi-g++)
-          set(TARGET_FLAGS "-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16")
+          
+          # Define target-specific flags, including the crucial spec for syscall stubs
+          set(TARGET_FLAGS "-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16 --specs=nosys.specs")
+          
           set(CMAKE_C_FLAGS           "${TARGET_FLAGS} -Wall -Wextra" CACHE INTERNAL "")
           set(CMAKE_CXX_FLAGS         "${TARGET_FLAGS} -Wall -Wextra -fno-exceptions" CACHE INTERNAL "")
           set(CMAKE_ASM_FLAGS         "${TARGET_FLAGS}" CACHE INTERNAL "")
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
 
-          # 3. [诊断] 验证文件是否已成功创建
           echo "--- Verifying Toolchain File ---"
           ls -l ${TOOLCHAIN_PATH}
           cat ${TOOLCHAIN_PATH}
           echo "------------------------------"
           
-          # 4. [正确用法] 将工具链文件的 *绝对路径* 作为第一个参数传递给脚本
           echo "🚀 Starting the build process, passing the toolchain file path directly..."
           ros2 run micro_ros_setup build_firmware.sh ${TOOLCHAIN_PATH} libmicroros.cmake
           echo "::endgroup::"
