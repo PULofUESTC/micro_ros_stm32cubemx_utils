@@ -1,8 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v8 最终修正版。修正了 v7 中 build_firmware.sh 脚本的错误路径。
-#       我们必须修改 colcon 安装后的脚本 (在 install/ 目录)，而不是源码脚本 (在 src/ 目录)。
+# 描述: v9 健壮性增强版。解决了 v8 中因 `grep` 未找到匹配项而导致工作流失败的问题。
+#       1. 增加了更详细的日志，在修改前后都打印脚本内容。
+#       2. 使用 'if grep -q' 结构进行更安全的验证，避免因 `set -e` 导致意外中止。
 
-name: Build micro-ROS From Source (Final Fix v8 - Correct Path)
+name: Build micro-ROS From Source (Final Fix v9 - Robust Verification)
 
 on:
   workflow_dispatch:
@@ -37,7 +38,6 @@ jobs:
           for i in 1 2 3; do sudo rosdep init && break || sleep 5; done
           rosdep update
           
-          # 编译和安装 micro_ros_setup 工具，这将创建我们要修改的脚本
           colcon build --packages-select micro_ros_setup
           echo "::endgroup::"
           
@@ -50,7 +50,7 @@ jobs:
           echo "::endgroup::"
           
           echo "::group::3. Modify script, Set Environment, and Build"
-          # --- 【v8 最终修正核心】 ---
+          # --- 【v9 健壮性增强核心】 ---
 
           # 1. 定义工具链文件的绝对路径
           TOOLCHAIN_PATH="${PWD}/stm32_hardfloat.cmake"
@@ -69,29 +69,39 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
           
-          # 3. 设置 COLCON_CMAKE_ARGS 环境变量 (我们的期望配置)
+          # 3. 设置 COLCON_CMAKE_ARGS 环境变量
           export COLCON_CMAKE_ARGS="--no-warn-unused-cli -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH}"
           echo "✅ COLCON_CMAKE_ARGS has been set to: '${COLCON_CMAKE_ARGS}'"
 
-          # 4. [路径修正] 定义要修改的、位于 *安装目录* 的脚本的正确路径
+          # 4. 定义要修改的、位于 *安装目录* 的脚本的正确路径
           BUILD_SCRIPT_PATH="install/micro_ros_setup/lib/micro_ros_setup/build_firmware.sh"
           echo " targeting the *installed* script at: ${BUILD_SCRIPT_PATH}"
 
-          # 5. [诊断] 在修改前，先验证该文件是否存在
-          echo "--- Verifying script to be modified exists ---"
-          ls -l ${BUILD_SCRIPT_PATH}
+          # 5. [诊断] 在修改前，打印脚本中 colcon build 命令附近的上下文
+          echo "--- Script content BEFORE modification ---"
+          grep -C 5 "colcon build" ${BUILD_SCRIPT_PATH}
           echo "----------------------------------------"
 
           # 6. [外科手术] 对 build_firmware.sh 脚本进行在線修改
-          # 这条命令会找到 "-DCMAKE_TOOLCHAIN_FILE=..." 这一整段参数，并把它替换为空字符串（即删除）
           sed -i 's|-DCMAKE_TOOLCHAIN_FILE=\${TOOLCHAIN_FILE_NAME}||g' ${BUILD_SCRIPT_PATH}
 
-          # 7. [诊断] 打印修改后的脚本内容，确认修改成功
-          echo "--- Verifying script modification ---"
-          grep "colcon build" ${BUILD_SCRIPT_PATH}
-          echo "-------------------------------------"
+          # 7. [诊断] 在修改后，再次打印脚本内容以供对比
+          echo "--- Script content AFTER modification ---"
+          # 使用 '|| true' 来确保即使 grep 找不到匹配项，脚本也不会因此失败
+          grep -C 5 "colcon build" ${BUILD_SCRIPT_PATH} || true
+          echo "---------------------------------------"
+          
+          # 8. [健壮验证] 使用不会导致脚本失败的方式来验证修改是否成功
+          echo "--- Verifying script modification (Robust Check) ---"
+          if grep -q "CMAKE_TOOLCHAIN_FILE" ${BUILD_SCRIPT_PATH}; then
+            echo "❌ ERROR: The toolchain argument was NOT removed from the script."
+            exit 1
+          else
+            echo "✅ SUCCESS: The toolchain argument was successfully removed."
+          fi
+          echo "----------------------------------------------------"
 
-          # 8. 执行被我们修改过的脚本
+          # 9. 执行被我们修改过的脚本
           echo "🚀 Starting the build process with the modified script..."
           ros2 run micro_ros_setup build_firmware.sh stm32_hardfloat libmicroros.cmake
           echo "::endgroup::"
