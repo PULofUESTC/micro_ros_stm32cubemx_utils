@@ -1,8 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v20 (最终平台兼容版) 在 v19 的精准配置基础上，解决了 rcutils 包中
-#       filesystem.c 的编译错误。通过在 colcon.meta 文件中为 rcutils 添加
-#       -DRCUTILS_ENABLE_FILESYSTEM_UTILS=OFF 标志，我们禁用了对裸机平台
-#       (bare-metal) 不支持的文件系统功能的编译，这是完成平台适配的最后一步。
+# 描述: v21 (物理移除版) 采用了最直接的手段解决顽固的编译问题。
+#       鉴于为 rcutils 设置的 -DRCUTILS_ENABLE_FILESYSTEM_UTILS=OFF 标志
+#       未能生效，此版本在执行 colcon build 之前，通过 rm 命令物理删除了
+#       导致问题的 a/firmware/mcu_ws/uros/rcutils/src/filesystem.c 文件。
+#       这是一种在嵌入式交叉编译中处理平台不兼容代码的可靠最终方案。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -66,15 +67,14 @@ jobs:
           cd firmware/mcu_ws
           echo "✅ Changed directory to $(pwd), which contains the 'src' folder for colcon."
 
-          # 【v20 变更】在 colcon.meta 中为 rcutils 添加禁用文件系统工具的标志
+          # 仍然保留 colcon.meta，因为它成功解决了 time_unix.c 的问题
           META_FILE_PATH="${PWD}/colcon.meta"
           echo "ℹ️ Creating colcon meta file for precise configuration: ${META_FILE_PATH}"
           echo '{
               "packages": {
                   "rcutils": {
                       "cmake-args": [
-                          "-DRCUTILS_USE_CUSTOM_CLOCK=ON",
-                          "-DRCUTILS_ENABLE_FILESYSTEM_UTILS=OFF"
+                          "-DRCUTILS_USE_CUSTOM_CLOCK=ON"
                       ]
                   },
                   "rmw_microxrcedds": {
@@ -87,11 +87,16 @@ jobs:
               }
           }' > ${META_FILE_PATH}
 
-          echo "--- Verifying colcon.meta File ---"
-          cat ${META_FILE_PATH}
-          echo "------------------------------------"
+          # 【v21 变更】物理移除导致问题的源文件
+          PROBLEM_FILE="src/uros/rcutils/src/filesystem.c"
+          if [ -f "$PROBLEM_FILE" ]; then
+            echo "🔥 Applying surgical fix: Physically removing incompatible file: $PROBLEM_FILE"
+            rm "$PROBLEM_FILE"
+          else
+            echo "ℹ️ Incompatible file not found, perhaps already removed or not downloaded."
+          fi
 
-          echo "🚀 Starting the build process using colcon.meta for configuration..."
+          echo "🚀 Starting the final build process..."
           colcon build \
             --merge-install \
             --cmake-args \
@@ -123,3 +128,4 @@ jobs:
         with:
           name: libmicroros-cortex-m4-hard-float
           path: export/
+
