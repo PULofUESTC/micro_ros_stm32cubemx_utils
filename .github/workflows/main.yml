@@ -1,9 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v13 (最终版) 使用 micro-ROS 官方推荐的 "meta file" 机制来注入平台配置。
-#       通过创建一个自定义的 CMake 元数据文件，我们直接、可靠地设置了裸机编译
-#       所需的全部选项，解决了环境变量无法传递的问题，完成了最终的修复。
+# 描述: v14 (真正最终版) 放弃使用封装脚本 build_firmware.sh，转而直接调用
+#       colcon build。通过 --cmake-args 参数，我们得以精确、可靠地注入工具链
+#       文件路径和所有必需的平台配置定义，最终成功完成交叉编译。
 
-name: Build micro-ROS From Source (Final Version v13 - Custom Meta File)
+name: Build micro-ROS From Source (True Final Version v14 - Direct Colcon Call)
 
 on:
   workflow_dispatch:
@@ -52,12 +52,12 @@ jobs:
           rosdep install --from-paths src --ignore-src -y
           echo "::endgroup::"
           
-          echo "::group::3. Configure Platform and Build Firmware"
-          # --- 【v13 最终修复核心】 ---
+          echo "::group::3. Configure and Build Firmware with Direct Colcon Call"
+          # --- 【v14 最终修复核心】 ---
 
           # 1. 创建工具链文件 (保持不变)
           TOOLCHAIN_FILENAME="stm32_hardfloat.cmake"
-          TOOLCHAIN_PATH="${PWD}/${TOOLCHAIN_FILENAME}"
+          TOOLCHAIN_PATH="${PWD}/firmware/${TOOLCHAIN_FILENAME}" # 放在 firmware 目录下更规范
           echo "ℹ️ Creating toolchain file: ${TOOLCHAIN_PATH}"
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
@@ -70,29 +70,27 @@ jobs:
           set(CMAKE_ASM_FLAGS         "${TARGET_FLAGS}" CACHE INTERNAL "")
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
-
-          # 2. 【v13 变更】创建自定义元数据文件 (Custom Meta File)
-          META_FILENAME="custom_meta.cmake"
-          META_FILE_PATH="${PWD}/${META_FILENAME}"
-          echo "ℹ️ Creating custom meta file for platform features: ${META_FILE_PATH}"
-          echo '# Custom meta file for micro-ROS bare-metal configuration
-          # This sets CMake variables to disable host-specific features like filesystems.
-          set(RMW_UXRCE_TRANSPORT "custom" CACHE STRING "")
-          set(UCLIENT_PROFILE_UDP OFF CACHE BOOL "")
-          set(UCLIENT_PROFILE_TCP OFF CACHE BOOL "")
-          set(BUILD_SHARED_LIBS OFF CACHE BOOL "")
-          ' > ${META_FILE_PATH}
           
-          echo "--- Verifying Toolchain & Meta Files ---"
-          echo "--- Toolchain File ---"
+          echo "--- Verifying Toolchain File ---"
           cat ${TOOLCHAIN_PATH}
-          echo "--- Meta File ---"
-          cat ${META_FILE_PATH}
-          echo "----------------------------------------"
+          echo "--------------------------------"
 
-          # 3. 运行构建脚本，这次传递我们自己的元数据文件
-          echo "🚀 Starting the build process using custom toolchain and meta files..."
-          ros2 run micro_ros_setup build_firmware.sh ${TOOLCHAIN_PATH} ${META_FILE_PATH}
+          # 2. 【v14 变更】直接调用 colcon build 并传入所有参数
+          #    进入 firmware 目录，这是 colcon build 的工作上下文
+          cd firmware
+
+          echo "🚀 Starting the build process with a direct 'colcon build' call..."
+          colcon build \
+            --build-base build \
+            --install-base install \
+            --cmake-args \
+              -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
+              -DRMW_UXRCE_TRANSPORT=custom \
+              -DUCLIENT_PROFILE_UDP=OFF \
+              -DUCLIENT_PROFILE_TCP=OFF \
+              -DBUILD_SHARED_LIBS=OFF
+          
+          cd .. # 返回 microros_ws 目录
           echo "::endgroup::"
 
           echo "::group::4. Package the artifacts"
