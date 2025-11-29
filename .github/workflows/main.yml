@@ -7,33 +7,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 检出代码 (强制指定 humble 分支结构)
+      # 1. 检出代码 (明确指定 humble 分支)
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: humble
 
-      # 2. 准备目录 (防止 Docker 权限错误)
-      - name: Prepare directories
-        run: |
-          mkdir -p microros_static_library_ide/lib/microros
-          chmod -R 777 microros_static_library_ide
-
-      # 3. 运行 Docker 编译
-      # 使用 sudo 运行以确保 Docker 有权限写入挂载卷
+      # 2. 运行编译 (使用独立的输出目录)
       - name: Build libmicroros.a using Docker
         run: |
-          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
+          # 创建一个干净的专用输出目录
+          mkdir -p build_output
+          chmod 777 build_output
 
-      # 4. 检查文件 (调试用)
-      - name: Check if file exists
+          # 运行 Docker
+          # 注意：我们将 build_output 挂载到容器的 /project/microros_static_library
+          # 这样容器生成的所有文件都会出现在 build_output 里
+          sudo docker run --rm -v $(pwd)/build_output:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
+
+          # 修复文件权限 (Docker生成的文件是root权限，改为当前用户以便上传)
+          sudo chown -R $USER:$USER build_output
+
+      # 3. [调试步骤] 列出文件结构
+      # 如果上传失败，查看这一步的日志就能知道文件到底在哪
+      - name: Debug - List Generated Files
         run: |
-          ls -l microros_static_library_ide/lib/microros/
-          sudo chown -R $USER:$USER microros_static_library_ide
+          echo "=== Content of build_output ==="
+          ls -R build_output
 
-      # 5. 上传产物
+      # 4. 上传产物 (路径已更新为 build_output)
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
           name: libmicroros_hard_float
           path: |
-            microros_static_library_ide/lib/microros/libmicroros.a
-            microros_static_library_ide/lib/microros/include/
+            build_output/lib/microros/libmicroros.a
+            build_output/lib/microros/include/
