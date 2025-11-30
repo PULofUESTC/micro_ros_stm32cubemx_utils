@@ -1,11 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v55 (最终合并版 - The Golden Release)
+# 描述: v56 (绝对路径修正版 - The Final Corrected)
 #
-# 1. 继承胜利: 所有的编译修复(v35-v54)均已生效，所有包编译通过。
-# 2. 新增步骤: "Merge Libraries"。
-#    原因: colcon build 生成的是分散的 .a 文件。我们需要将其合并为
-#          单体库 libmicroros.a，方便 STM32 链接。
-# 3. 方法: 使用 arm-none-eabi-ar 的 MRI 脚本功能进行静态库合并。
+# 1. 编译胜利: 继承 v54 的所有编译修复 (编译已通过 Summary: 70 packages finished)。
+# 2. 合并修复: 增加 library merge 步骤，将分散的 .a 文件合并为 libmicroros.a。
+# 3. 路径修复: 
+#    - 在脚本开头定义 PROJECT_ROOT=$(pwd)。
+#    - 创建 export 目录时使用 $PROJECT_ROOT/export，确保它位于仓库最顶层。
+#    - 这样 actions/upload-artifact 才能正确找到文件。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -34,6 +35,10 @@ jobs:
       - name: Create, Build and Package micro-ROS
         shell: bash
         run: |
+          # 【路径锚点】锁定当前绝对路径 (仓库根目录)
+          PROJECT_ROOT=$(pwd)
+          echo "DIAGNOSTIC: Project Root identified as: $PROJECT_ROOT"
+
           source /opt/ros/humble/setup.bash
 
           echo "::group::1. Prepare and build the micro_ros_setup tool"
@@ -67,11 +72,12 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
           
+          # 进入固件工作空间
           cd firmware/mcu_ws
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # STRATEGY 0: RCUTILS REPAIR (保持不变)
+          # STRATEGY 0: RCUTILS REPAIR
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -82,7 +88,7 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT REPAIR (保持不变)
+          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT REPAIR
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           XRCE_TRANSPORT_H="${XRCE_CLIENT_PATH}/include/uxr/client/transport.h"
@@ -121,7 +127,7 @@ jobs:
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # BUILD (保持成功配置)
+          # BUILD
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
           
@@ -144,7 +150,6 @@ jobs:
               -DRCUTILS_NO_FILESYSTEM=ON \
               -DUCLIENT_CUSTOM_TRANSPORT_MTU=512 \
               -DRMW_UXRCE_TRANSPORT=custom \
-              -DRMW_IMPLEMENTATION=rmw_microxrcedds \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_c=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_cpp=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_generator_py=ON \
@@ -157,57 +162,60 @@ jobs:
           echo "::endgroup::"
 
           # ====================================================================
-          # MERGE LIBRARIES (关键新增步骤)
+          # MERGE & PACKAGE (使用绝对路径)
           # ====================================================================
           echo "::group::4. Merge and Package Artifacts"
           
-          # 1. 准备导出目录
-          cd ../.. # 回到根工作空间 microros_ws
-          mkdir -p export/lib
-          mkdir -p export/include
+          # 1. 在根目录创建 export 文件夹 (使用 absolute path)
+          mkdir -p "$PROJECT_ROOT/export/lib"
+          mkdir -p "$PROJECT_ROOT/export/include"
           
-          # 2. 进入安装目录准备合并
-          INSTALL_LIB_DIR="firmware/mcu_ws/install/lib"
-          if [ ! -d "$INSTALL_LIB_DIR" ]; then
-             echo "DIAGNOSTIC: ❌ FATAL: Install directory not found!"
+          # 2. 检查安装目录 (install/lib 包含所有生成的 .a)
+          # 注意：我们现在还在 firmware/mcu_ws 目录下
+          if [ ! -d "install/lib" ]; then
+             echo "DIAGNOSTIC: ❌ FATAL: install/lib not found! Build likely failed."
+             ls -R
              exit 1
           fi
           
-          cd "$INSTALL_LIB_DIR"
+          # 3. 进入 install/lib 进行合并
+          cd install/lib
           echo "DIAGNOSTIC: Merging static libraries in $(pwd)..."
           
-          # 3. 创建 MRI 脚本
+          # 生成 MRI 脚本
           echo "create libmicroros.a" > lib.mri
-          # 找到所有 .a 文件并添加到脚本
           find . -maxdepth 1 -name "*.a" -print0 | while IFS= read -r -d '' file; do
-              # 排除自身 (如果已存在)
               if [ "$file" != "./libmicroros.a" ]; then
                   echo "addlib $file" >> lib.mri
-                  echo "  -> Adding $file"
+                  echo "  -> Merging $file"
               fi
           done
           echo "save" >> lib.mri
           echo "end" >> lib.mri
           
-          # 4. 执行合并
+          # 执行合并
           arm-none-eabi-ar -M < lib.mri
           
+          # 4. 验证与移动
           if [ -f "libmicroros.a" ]; then
              echo "DIAGNOSTIC: ✅ SUCCESS! libmicroros.a created."
              
-             # 5. 符号检查
+             # 符号检查
              if arm-none-eabi-nm "libmicroros.a" | grep -q "T uxr_init_session"; then
-                echo "DIAGNOSTIC: [OK] uxr_init_session found."
+                echo "DIAGNOSTIC: [OK] Library looks valid (contains uxr_init_session)."
              else
-                echo "DIAGNOSTIC: [FAIL] uxr_init_session MISSING!"
+                echo "DIAGNOSTIC: [WARNING] Library might be empty or invalid."
              fi
              
-             # 6. 移动产物
-             mv libmicroros.a ../../../../export/lib/
-             cd ../include
-             cp -r * ../../../../export/include/
+             # 移动到绝对路径的 export 目录
+             cp libmicroros.a "$PROJECT_ROOT/export/lib/"
              
-             echo "DIAGNOSTIC: Artifacts packaged successfully."
+             # 拷贝头文件
+             # 假设 include 目录在 install/include
+             cd ../include
+             cp -r * "$PROJECT_ROOT/export/include/"
+             
+             echo "DIAGNOSTIC: Artifacts successfully packaged to $PROJECT_ROOT/export"
           else
              echo "DIAGNOSTIC: ❌ FATAL: Failed to create libmicroros.a"
              exit 1
