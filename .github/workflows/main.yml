@@ -1,11 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v26 (命令行参数整合版) - 遵从用户要求，将所有 CMake 配置参数从
-#       colcon.meta 文件中移出，直接整合到 colcon build 命令的 -D 参数中。
-#       这样做使得构建配置更加集中和透明。
-#       
-#       关键点：我们仍然保留了对 uros/rcutils/CMakeLists.txt 的 sed patch，
-#       因为它解决了 filesystem.c 被硬编码导致编译失败的根本问题，这是 -D 参数
-#       无法解决的。-D 参数与 sed patch 共同作用，确保构建成功。
+# 描述: v27 (最终正确版) - 根据用户的精准反馈，此版本纠正了 v26 中
+#       colcon build 命令的严重错误。我们恢复使用 colcon.meta 文件来为
+#       特定软件包（如 rcutils 和 rmw_microxrcedds）提供独立的 CMake 参数。
+#       这是 colcon 工具链处理此类需求的标准且唯一可靠的最佳实践。
+#       此版本结合了 v25 的正确配置方法和持续的优化，是目前最稳健的方案。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -72,7 +70,7 @@ jobs:
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "🔥 Applying definitive patch to ${RCUTILS_CMAKE_FILE}..."
           
-          # 【v25 核心修复，必须保留】直接删除包含 "src/filesystem.c" 的那一行
+          # 【核心修复，必须保留】直接删除包含 "src/filesystem.c" 的那一行
           sed -i '/src\/filesystem.c/d' ${RCUTILS_CMAKE_FILE}
 
           echo "🔍 Verifying patch..."
@@ -83,25 +81,35 @@ jobs:
             exit 1
           fi
           
-          # 【v26 变更】移除 colcon.meta 文件，将参数直接加入下面的 colcon build 命令
-          echo "ℹ️ Configuration will be passed directly via command line, no colcon.meta file needed."
+          # 【v27 修正】恢复使用 colcon.meta 文件来传递分包参数
+          META_FILE_PATH="${PWD}/colcon.meta"
+          echo "ℹ️ Creating colcon meta file for package-specific configuration: ${META_FILE_PATH}"
+          echo '{
+              "packages": {
+                  "rcutils": {
+                      "cmake-args": [
+                          "-DRCUTILS_USE_CUSTOM_CLOCK=ON",
+                          "-DRCUTILS_NO_FILESYSTEM=ON"
+                      ]
+                  },
+                  "rmw_microxrcedds": {
+                      "cmake-args": [
+                          "-DRMW_UXRCE_TRANSPORT=custom",
+                          "-DUCLIENT_PROFILE_UDP=OFF",
+                          "-DUCLIENT_PROFILE_TCP=OFF"
+                      ]
+                  }
+              }
+          }' > ${META_FILE_PATH}
 
           echo "🚀 Starting the definitive build process..."
+          # 【v27 修正】使用简洁的 colcon build 命令，所有分包参数由 colcon.meta 管理
           colcon build \
             --merge-install \
             --cmake-args \
               -DBUILD_TESTING=OFF \
               -DBUILD_SHARED_LIBS=OFF \
-              -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
-            --packages-select rcutils \
-            --cmake-args \
-              -DRCUTILS_USE_CUSTOM_CLOCK=ON \
-              -DRCUTILS_NO_FILESYSTEM=ON \
-            --packages-select rmw_microxrcedds \
-            --cmake-args \
-              -DRMW_UXRCE_TRANSPORT=custom \
-              -DUCLIENT_PROFILE_UDP=OFF \
-              -DUCLIENT_PROFILE_TCP=OFF
+              -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH}
           
           cd ../.. 
           echo "::endgroup::"
