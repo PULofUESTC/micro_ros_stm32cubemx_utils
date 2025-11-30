@@ -1,12 +1,11 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v54 (屏蔽升级版)
+# 描述: v55 (最终合并版 - The Golden Release)
 #
-# 1. 继承: 保留 v53 所有修复 (开启异常, rcutils修复, client修复)。
-# 2. 新增修复: 解决 "rmw_implementation" 编译时的 FastCDR 依赖错误。
-#    原因: 构建系统试图编译通用的 RMW 实现层，它默认会寻找系统中的 FastRTPS。
-# 3. 解决方案: 使用 "CMAKE_DISABLE_FIND_PACKAGE" 强制屏蔽 rmw_fastrtps_cpp, 
-#    rmw_cyclonedds_cpp, 以及最关键的 rmw_dds_common (它引入了 fastcdr 依赖)。
-#    同时显式指定 -DRMW_IMPLEMENTATION=rmw_microxrcedds。
+# 1. 继承胜利: 所有的编译修复(v35-v54)均已生效，所有包编译通过。
+# 2. 新增步骤: "Merge Libraries"。
+#    原因: colcon build 生成的是分散的 .a 文件。我们需要将其合并为
+#          单体库 libmicroros.a，方便 STM32 链接。
+# 3. 方法: 使用 arm-none-eabi-ar 的 MRI 脚本功能进行静态库合并。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -56,7 +55,6 @@ jobs:
           TOOLCHAIN_PATH="${PWD}/firmware/stm32_hardfloat.cmake" 
           echo "DIAGNOSTIC: Creating toolchain file at: ${TOOLCHAIN_PATH}"
           
-          # 【v53 关键修改】移除 -fno-exceptions 以支持 C++ 异常
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -123,12 +121,9 @@ jobs:
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # BUILD (屏蔽升级版)
+          # BUILD (保持成功配置)
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
-          
-          # 【重点】大幅增加 CMAKE_DISABLE_FIND_PACKAGE 列表
-          # 屏蔽掉所有可能引入 FastRTPS/FastCDR 依赖的包
           
           colcon build \
             --merge-install \
@@ -159,32 +154,63 @@ jobs:
               -DCMAKE_DISABLE_FIND_PACKAGE_rmw_dds_common=ON \
               --no-warn-unused-cli
           
-          cd ../.. 
           echo "::endgroup::"
 
           # ====================================================================
-          # VERIFICATION
+          # MERGE LIBRARIES (关键新增步骤)
           # ====================================================================
-          echo "::group::4. Verify and Package Artifacts"
-          LIB_PATH=$(find firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
+          echo "::group::4. Merge and Package Artifacts"
           
-          if [ -z "$LIB_PATH" ]; then
-            echo "DIAGNOSTIC: ❌ FATAL: libmicroros.a was NOT found."
-            exit 1
+          # 1. 准备导出目录
+          cd ../.. # 回到根工作空间 microros_ws
+          mkdir -p export/lib
+          mkdir -p export/include
+          
+          # 2. 进入安装目录准备合并
+          INSTALL_LIB_DIR="firmware/mcu_ws/install/lib"
+          if [ ! -d "$INSTALL_LIB_DIR" ]; then
+             echo "DIAGNOSTIC: ❌ FATAL: Install directory not found!"
+             exit 1
+          fi
+          
+          cd "$INSTALL_LIB_DIR"
+          echo "DIAGNOSTIC: Merging static libraries in $(pwd)..."
+          
+          # 3. 创建 MRI 脚本
+          echo "create libmicroros.a" > lib.mri
+          # 找到所有 .a 文件并添加到脚本
+          find . -maxdepth 1 -name "*.a" -print0 | while IFS= read -r -d '' file; do
+              # 排除自身 (如果已存在)
+              if [ "$file" != "./libmicroros.a" ]; then
+                  echo "addlib $file" >> lib.mri
+                  echo "  -> Adding $file"
+              fi
+          done
+          echo "save" >> lib.mri
+          echo "end" >> lib.mri
+          
+          # 4. 执行合并
+          arm-none-eabi-ar -M < lib.mri
+          
+          if [ -f "libmicroros.a" ]; then
+             echo "DIAGNOSTIC: ✅ SUCCESS! libmicroros.a created."
+             
+             # 5. 符号检查
+             if arm-none-eabi-nm "libmicroros.a" | grep -q "T uxr_init_session"; then
+                echo "DIAGNOSTIC: [OK] uxr_init_session found."
+             else
+                echo "DIAGNOSTIC: [FAIL] uxr_init_session MISSING!"
+             fi
+             
+             # 6. 移动产物
+             mv libmicroros.a ../../../../export/lib/
+             cd ../include
+             cp -r * ../../../../export/include/
+             
+             echo "DIAGNOSTIC: Artifacts packaged successfully."
           else
-            echo "DIAGNOSTIC: ✅ SUCCESS! Found library at: $LIB_PATH"
-            
-            if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
-                echo "DIAGNOSTIC: ✅ [OK] uxr_init_session found."
-            else
-                echo "DIAGNOSTIC: ❌ [FAIL] uxr_init_session MISSING!"
-            fi
-
-            mkdir -p export/lib
-            mkdir -p export/include
-            cp "$LIB_PATH" export/lib/
-            cp -r microros_ws/firmware/mcu_ws/install/include/* export/include/
-            echo "DIAGNOSTIC: Artifacts are verified and ready."
+             echo "DIAGNOSTIC: ❌ FATAL: Failed to create libmicroros.a"
+             exit 1
           fi
           echo "::endgroup::"
 
