@@ -1,15 +1,13 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v36 (生产级验证版)
+# 描述: v37 (源码级配置篡改版)
 #
-# 1. 构建策略: 延续 v35 的全局参数注入与缓存清理。
-# 2. 关键修正: 
-#    - 对于 Micro-XRCE-DDS-Client 的 time.c，我们不再填充 "return 0"，
-#      而是将其清空。这会迫使生成的静态库包含 "U uxr_millis" (未定义符号)。
-#      这强制用户在 STM32 代码中实现真实的时间函数，避免"时间静止"的 Bug。
-# 3. 新增功能:
-#    - 添加 "Verify Library Artifacts" 步骤。
-#    - 使用 arm-none-eabi-nm 检查库文件，确保 micro-ROS 核心符号存在，
-#      并验证所有 POSIX 符号已被成功剔除。
+# 1. 继承胜利: rcutils 的五重切除术保持不变。
+# 2. 攻克顽疾: 针对 microxrcedds_client 无视命令行参数的问题，
+#    我们直接修改其 CMakeLists.txt 源码，将 UDP/TCP/Serial 的默认值改为 OFF。
+# 3. 细节优化: 
+#    - time.c 加入 dummy typedef 消除警告。
+#    - 显式传入 MTU 参数以防万一。
+#    - 最终进行符号验证。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -75,7 +73,7 @@ jobs:
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # PHASE 1: rcutils 修复 (五重切除)
+          # PHASE 1: rcutils 修复 (五重切除 - 已验证)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -86,17 +84,33 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # PHASE 2: microxrcedds_client 时间文件处理 (留白策略)
+          # PHASE 2: microxrcedds_client 源码级篡改 (关键修复)
           # ====================================================================
-          # 我们清空 time.c，但不提供实现。
-          # 这样 .a 库中不会包含 time 符号，CubeIDE 链接时会报错提示用户实现它。
-          # 从而确保使用真实的 STM32 时钟。
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
+          XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
+          
+          echo "DIAGNOSTIC: Modifying ${XRCE_CMAKE_FILE} to force disable Linux transports..."
+          
+          # 1. 暴力替换默认值 ON -> OFF
+          # 我们使用极其宽泛的正则匹配，确保能够命中
+          sed -i 's/"Enable UDP transport" ON/"Enable UDP transport" OFF/g' ${XRCE_CMAKE_FILE}
+          sed -i 's/"Enable TCP transport" ON/"Enable TCP transport" OFF/g' ${XRCE_CMAKE_FILE}
+          sed -i 's/"Enable Serial transport" ON/"Enable Serial transport" OFF/g' ${XRCE_CMAKE_FILE}
+          
+          # 2. 暴力启用 Custom Transport
+          sed -i 's/"Enable Custom transport" OFF/"Enable Custom transport" ON/g' ${XRCE_CMAKE_FILE}
+
+          # 3. 验证修改
+          echo "DIAGNOSTIC: Checking modified CMakeLists.txt..."
+          grep "Enable UDP transport" ${XRCE_CMAKE_FILE} || echo "UDP option not found!"
+          grep "Enable Custom transport" ${XRCE_CMAKE_FILE} || echo "Custom option not found!"
+
+          # 4. 处理 time.c
           XRCE_TIME_FILE="${XRCE_CLIENT_PATH}/src/c/util/time.c"
-          if [ -f "$XRCE_TIME_FILE" ]; then
-            echo "DIAGNOSTIC: Emptying ${XRCE_TIME_FILE} to delegate time implementation to user code..."
-            echo "/* Content removed to force user implementation of uxr_millis */" > ${XRCE_TIME_FILE}
-          fi
+          echo "DIAGNOSTIC: Neutralizing ${XRCE_TIME_FILE}..."
+          # 加入 typedef int dummy; 防止空文件警告
+          echo "/* Content removed. User must implement uxr_millis */" > ${XRCE_TIME_FILE}
+          echo "typedef int dummy_symbol_to_avoid_empty_translation_unit_warning;" >> ${XRCE_TIME_FILE}
 
           # ====================================================================
           # PHASE 3: 缓存深度清理
@@ -109,8 +123,9 @@ jobs:
           echo "DIAGNOSTIC: Clean complete. Starting fresh build..."
 
           # ====================================================================
-          # PHASE 4: 构建 (Global Force Injection)
+          # PHASE 4: 构建
           # ====================================================================
+          # 虽然我们修改了源码，但保留命令行参数作为双重保险
           
           colcon build \
             --merge-install \
@@ -125,6 +140,7 @@ jobs:
               -DUCLIENT_PROFILE_SERIAL=OFF \
               -DUCLIENT_PROFILE_STREAM_FRAMING=ON \
               -DUCLIENT_PROFILE_CUSTOM_TRANSPORT=ON \
+              -DUCLIENT_CUSTOM_TRANSPORT_MTU=512 \
               -DRMW_UXRCE_TRANSPORT=custom \
               --no-warn-unused-cli
           
@@ -132,7 +148,7 @@ jobs:
           echo "::endgroup::"
 
           # ====================================================================
-          # PHASE 5: 产物验证 (Artifact Verification)
+          # PHASE 5: 产物验证
           # ====================================================================
           echo "::group::5. Verify and Package Artifacts"
           LIB_PATH=$(find firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
@@ -144,26 +160,28 @@ jobs:
             echo "DIAGNOSTIC: ✅ SUCCESS! Found library at: $LIB_PATH"
             
             echo "DIAGNOSTIC: 🔍 Inspecting Library Symbols..."
-            # 检查关键符号是否存在 (T = Text/Defined)
+            # 
+            
+            # 1. 验证关键函数存在
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
                 echo "  [OK] uxr_init_session found."
             else
                 echo "  [FAIL] uxr_init_session MISSING!"
             fi
-
-            # 检查 POSIX 符号是否已被剔除 (即不应该有 U clock_gettime, 除非它是弱引用，或者应该完全没有)
-            # 注意：如果 time.c 被清空，库里不应该有 clock_gettime 的引用
-            if arm-none-eabi-nm "$LIB_PATH" | grep "clock_gettime"; then
-                echo "  [WARNING] 'clock_gettime' symbol found! (Might cause link errors)"
+            
+            # 2. 验证时间函数未定义 (关键!)
+            # 这意味着 STM32 链接时会报错，直到用户实现了它 —— 这是我们想要的正确行为
+            if arm-none-eabi-nm "$LIB_PATH" | grep -q "U uxr_millis"; then
+                echo "  [OK] uxr_millis is Undefined (Correct behavior)."
             else
-                echo "  [OK] 'clock_gettime' symbol NOT found (Clean build)."
+                echo "  [WARNING] uxr_millis might be defined internally. Check logic."
             fi
 
-            # 检查时间接口是否未定义 (U = Undefined, expecting user implementation)
-            if arm-none-eabi-nm "$LIB_PATH" | grep "U uxr_millis"; then
-                echo "  [OK] 'uxr_millis' is UNDEFINED (As expected. User must implement this)."
+            # 3. 验证 UDP 符号不存在
+            if arm-none-eabi-nm "$LIB_PATH" | grep -q "uxr_init_udp"; then
+                echo "  [FAIL] UDP symbols found! Modification failed."
             else
-                echo "  [WARNING] 'uxr_millis' seems defined internally? Check time.c handling."
+                echo "  [OK] UDP symbols NOT found (Clean build)."
             fi
 
             cd ..
