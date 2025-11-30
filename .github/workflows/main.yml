@@ -1,13 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v44 (全方位立体防御版)
+# 描述: v45 (路径修正版)
 #
-# 策略: 同时应用三种解决思路，形成多重保险。
-# 1. [逻辑短路]: 修改 CMakeLists.txt 源码，将 if(UDP) 替换为 if(OFF)。
-# 2. [Meta修复]: 在根目录生成 colcon.meta 并使用绝对路径引用。
-# 3. [环境清洗]: 删除 client.config 和 CMake 缓存。
-#
-# 目的: 确保 microxrcedds_client 的 UDP/TCP/Serial 模块被彻底禁用，
-#      并正确链接用户自定义的 STM32 传输层。
+# 1. 故障复盘: v44 失败是因为脚本中途执行了 'cd ../..' 切回了根工作空间。
+#    根工作空间已包含旧的 install 目录(isolated布局)，导致 colcon 拒绝
+#    使用 --merge-install 进行覆盖构建。
+# 2. 修正方案: 删除目录切换命令，确保最终构建在 'firmware/mcu_ws' 
+#    这个已经执行过深度清理(DEEP CLEAN)的子工作空间中进行。
+# 3. 策略保持: 继续使用 "逻辑短路 (if(OFF))" 策略，这在 v44 中已被验证为成功。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -69,11 +68,12 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
           
+          # 进入子工作空间 (这是构建发生的正确位置)
           cd firmware/mcu_ws
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # STRATEGY 0: RCUTILS FOUNDATION (已验证有效)
+          # STRATEGY 0: RCUTILS FOUNDATION (五重切除)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: [Strategy 0] Applying rcutils surgical patches..."
@@ -90,25 +90,25 @@ jobs:
           XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
           echo "DIAGNOSTIC: [Strategy 1] Short-circuiting logic in ${XRCE_CMAKE_FILE}..."
           
-          # 使用正则匹配 if( 变量名 )，替换为 if(OFF)
-          # 这样无论变量值是什么，代码块永远不会执行
+          # 1. 禁用 Linux 传输层: 将 if(...PROFILE...) 替换为 if(OFF)
+          # 使用正则匹配，确保能够命中
           sed -i 's/if(.*UCLIENT_PROFILE_UDP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           sed -i 's/if(.*UCLIENT_PROFILE_TCP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           sed -i 's/if(.*UCLIENT_PROFILE_SERIAL.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           
-          # 强制开启 Custom Transport: 将 if(...CUSTOM...) 替换为 if(ON)
+          # 2. 启用 Custom 传输层: 将 if(...CUSTOM...) 替换为 if(ON)
           sed -i 's/if(.*UCLIENT_PROFILE_CUSTOM_TRANSPORT.*)/if(ON)/g' ${XRCE_CMAKE_FILE}
 
-          # 验证 Strategy 1
+          # 验证 (Critical Check)
           if grep -q "if(OFF)" ${XRCE_CMAKE_FILE}; then
              echo "DIAGNOSTIC: ✅ [Strategy 1] Logic Short-Circuit Applied Successfully."
           else
              echo "DIAGNOSTIC: ❌ [Strategy 1] Failed to apply short-circuit!"
-             grep "if(" ${XRCE_CMAKE_FILE} | grep "PROFILE"
+             grep "if(" ${XRCE_CMAKE_FILE}
              exit 1
           fi
 
-          # 顺手处理 time.c
+          # 3. 处理 time.c
           XRCE_TIME_FILE="${XRCE_CLIENT_PATH}/src/c/util/time.c"
           echo "/* Neutralized */ typedef int dummy;" > ${XRCE_TIME_FILE}
 
@@ -119,17 +119,17 @@ jobs:
           find . -name "client.config" -delete
           
           echo "DIAGNOSTIC: 🔥 Performing DEEP CLEAN of build artifacts..."
+          # 这里的清理至关重要，它确保当前目录 (firmware/mcu_ws) 是干净的
           rm -rf build/ install/ log/
           find . -name "CMakeCache.txt" -delete
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # STRATEGY 2: META PATH FIX (Meta 路径修复)
+          # STRATEGY 2: META CONFIGURATION (本地 Meta 配置)
           # ====================================================================
-          # 我们把 meta 文件生成在构建根目录，并用绝对路径引用
-          cd ../.. 
+          # 修正: 直接在当前目录生成 meta 文件，不切换目录
           META_FILE_PATH="$(pwd)/colcon_fixed.meta"
-          echo "DIAGNOSTIC: [Strategy 2] Creating meta file at Root: ${META_FILE_PATH}"
+          echo "DIAGNOSTIC: [Strategy 2] Creating meta file at: ${META_FILE_PATH}"
           
           echo '{
               "packages": {
@@ -154,7 +154,10 @@ jobs:
           # ====================================================================
           # FINAL BUILD
           # ====================================================================
-          echo "DIAGNOSTIC: Starting Final Build with All Defenses Active..."
+          echo "DIAGNOSTIC: Starting Final Build..."
+          
+          # 在 firmware/mcu_ws 目录下运行构建
+          # 这里的 install 目录已经被清空，所以 --merge-install 不会报错
           
           colcon build \
             --merge-install \
@@ -167,13 +170,16 @@ jobs:
               -DRMW_UXRCE_TRANSPORT=custom \
               --no-warn-unused-cli
           
+          # 构建完成后返回上一级，准备打包
+          cd ../.. 
           echo "::endgroup::"
 
           # ====================================================================
           # VERIFICATION
           # ====================================================================
           echo "::group::4. Verify and Package Artifacts"
-          LIB_PATH=$(find microros_ws/firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
+          # 注意路径: firmware/mcu_ws/build
+          LIB_PATH=$(find firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
           
           if [ -z "$LIB_PATH" ]; then
             echo "DIAGNOSTIC: ❌ FATAL: libmicroros.a was NOT found."
@@ -183,20 +189,17 @@ jobs:
             
             echo "DIAGNOSTIC: 🔍 Inspecting Library Symbols..."
             
-            # 1. 验证 UDP 符号是否彻底消失
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "udp_transport"; then
-                echo "DIAGNOSTIC: ❌ [FAIL] UDP symbols STILL found! All strategies failed."
+                echo "DIAGNOSTIC: ❌ [FAIL] UDP symbols STILL found!"
                 exit 1
             else
-                echo "DIAGNOSTIC: ✅ [OK] UDP symbols GONE. Defense successful."
+                echo "DIAGNOSTIC: ✅ [OK] UDP symbols GONE. Logic Short-circuit worked."
             fi
             
-            # 2. 验证关键函数存在
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
                 echo "DIAGNOSTIC: ✅ [OK] uxr_init_session found."
             fi
             
-            # 3. 验证时间函数未定义
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "U uxr_millis"; then
                 echo "DIAGNOSTIC: ✅ [OK] uxr_millis is Undefined (Correct behavior)."
             fi
@@ -204,7 +207,6 @@ jobs:
             mkdir -p export/lib
             mkdir -p export/include
             cp "$LIB_PATH" export/lib/
-            # 注意：头文件路径可能需要调整，这里拷贝 install 目录的头文件最保险
             cp -r microros_ws/firmware/mcu_ws/install/include/* export/include/
             echo "DIAGNOSTIC: Artifacts are verified and ready."
           fi
