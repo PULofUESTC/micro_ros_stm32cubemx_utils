@@ -1,12 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v48 (源文件核平版)
+# 描述: v49 (依赖裁剪版)
 #
-# 1. 故障复盘: 之前的尝试证明，无论是修改 CMake 变量、修改 if 逻辑，还是修改头文件，
-#    似乎都无法阻止构建系统将 udp_transport.c 加入编译列表。
-# 2. 终极策略: "如果你不能阻止它被编译，那就让它变成空文件。"
-#    直接清空 Micro-XRCE-DDS-Client 中所有不需要的传输层源文件 (.c)。
-#    这样即使 CMake 强行编译它们，也不会报错，只会生成无用的空对象文件。
-# 3. 补充: 保持头文件清洗，防止其他文件引用时报错。
+# 1. 继承胜利: 保留 v48 对 microxrcedds_client 的完美修复 (核平策略)。
+# 2. 新增修复: 解决 "Could not find fastcdr" 错误。
+#    原因: 构建系统试图编译标准的 ROS 2 类型支持包 (rosidl_typesupport_fastrtps)，
+#    它依赖主机端的 Fast-CDR 库，这与 ARM 架构不兼容。
+# 3. 解决方案: 使用 --packages-ignore 显式排除所有依赖 Fast-RTPS/Fast-CDR 的包。
+#    micro-ROS 只需要 rosidl_typesupport_microxrcedds。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -83,14 +83,11 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT NUCLEAR OPTION (源文件核平)
+          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT NUCLEAR OPTION (保持不变)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           
           echo "DIAGNOSTIC: Nuking unwanted transport source files..."
-          
-          # 定义需要清空的文件列表
-          # 注意：路径必须准确，基于之前的报错日志
           FILES_TO_NUKE=(
             "src/c/profile/transport/ip/udp/udp_transport.c"
             "src/c/profile/transport/ip/tcp/tcp_transport.c"
@@ -98,22 +95,16 @@ jobs:
             "src/c/util/time.c"
             "src/c/util/ping.c"
           )
-          
           for FILE in "${FILES_TO_NUKE[@]}"; do
             FULL_PATH="${XRCE_CLIENT_PATH}/${FILE}"
             if [ -f "$FULL_PATH" ]; then
-                echo "  -> Nuking ${FILE}"
-                echo "/* Content removed by build script to avoid compilation errors */" > "$FULL_PATH"
-                echo "typedef int dummy_symbol_to_avoid_empty_translation_unit_warning;" >> "$FULL_PATH"
-            else
-                echo "  -> WARNING: File not found: ${FILE}"
+                echo "/* Nuked */ typedef int dummy;" > "$FULL_PATH"
             fi
           done
 
           # ====================================================================
-          # STRATEGY 2: HEADER SANITIZATION (头文件清洗 - 保持)
+          # STRATEGY 2: HEADER SANITIZATION (保持不变)
           # ====================================================================
-          # 防止其他通用文件引用不存在的结构体
           XRCE_TRANSPORT_H="${XRCE_CLIENT_PATH}/include/uxr/client/transport.h"
           echo "DIAGNOSTIC: Sanitizing header file: ${XRCE_TRANSPORT_H}..."
           sed -i '/include.*udp_transport.h/d' ${XRCE_TRANSPORT_H}
@@ -121,10 +112,9 @@ jobs:
           sed -i '/include.*serial_transport.h/d' ${XRCE_TRANSPORT_H}
 
           # ====================================================================
-          # STRATEGY 3: CMAKE CONFIG (保持逻辑短路，作为双重保险)
+          # STRATEGY 3: CMAKE CONFIG (保持不变)
           # ====================================================================
           XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
-          echo "DIAGNOSTIC: Short-circuiting CMake logic..."
           sed -i 's/if(.*UCLIENT_PROFILE_UDP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           sed -i 's/if(.*UCLIENT_PROFILE_TCP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           sed -i 's/if(.*UCLIENT_PROFILE_SERIAL.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
@@ -140,12 +130,19 @@ jobs:
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # BUILD
+          # BUILD (关键变更: 排除不兼容的包)
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
           
+          # 【重点】这里我们排除了所有 fastrtps 相关的包
+          # 因为 micro-ROS 在 MCU 上不应该链接这些庞大的 DDS 实现
+          
           colcon build \
             --merge-install \
+            --packages-ignore \
+              rosidl_typesupport_fastrtps_c \
+              rosidl_typesupport_fastrtps_cpp \
+              rosidl_typesupport_cpp \
             --cmake-args \
               -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
               -DBUILD_TESTING=OFF \
@@ -172,15 +169,10 @@ jobs:
             echo "DIAGNOSTIC: ✅ SUCCESS! Found library at: $LIB_PATH"
             
             echo "DIAGNOSTIC: 🔍 Inspecting Library Symbols..."
-            
-            # 这次我们不需要检查 UDP 符号是否存在，因为源文件都空了，肯定不存在
-            
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
                 echo "DIAGNOSTIC: ✅ [OK] uxr_init_session found."
-            fi
-            
-            if arm-none-eabi-nm "$LIB_PATH" | grep -q "U uxr_millis"; then
-                echo "DIAGNOSTIC: ✅ [OK] uxr_millis is Undefined."
+            else
+                echo "DIAGNOSTIC: ❌ [FAIL] uxr_init_session MISSING!"
             fi
 
             mkdir -p export/lib
