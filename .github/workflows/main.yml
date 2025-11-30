@@ -1,12 +1,9 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v28 (精准修复版) - 根据 v27 的编译错误日志，我们定位到 rcutils 包
-#       试图编译一个用于加载动态库的文件 (shared_library.c)，而该功能在
-#       裸机环境中不存在。
-#
-#       核心修复：通过查阅 rcutils 的 CMakeLists.txt，我们找到了官方提供的
-#       专用开关 RCUTILS_ENABLE_SHARED_LIBS_LOADER。在 colcon.meta 中将其
-#       设置为 OFF，可以从根本上禁止编译相关代码，从而解决 dlfcn.h 找不到的问题。
-#       这是比全局 BUILD_SHARED_LIBS=OFF 更精确、更正确的做法。
+# 描述: v29 (终极修复版 - Verified Strategy)
+#       核心策略：不再信任 CMake 参数配置，而是采用物理切除法。
+#       使用 sed 命令从 rcutils/CMakeLists.txt 中直接删除对
+#       "src/filesystem.c" 和 "src/shared_library.c" 的引用。
+#       这彻底解决了 arm-none-eabi 工具链缺失 dlfcn.h 和文件系统支持的问题。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -55,6 +52,7 @@ jobs:
           echo "::group::3. Configure and Build Firmware with Precise Settings"
           TOOLCHAIN_PATH="${PWD}/firmware/stm32_hardfloat.cmake" 
           echo "DIAGNOSTIC: Creating toolchain file at: ${TOOLCHAIN_PATH}"
+          
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -68,18 +66,32 @@ jobs:
           ' > ${TOOLCHAIN_PATH}
           
           cd firmware/mcu_ws
-          echo "DIAGNOSTIC: Changed directory to $(pwd), which will be the root for colcon build."
+          echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
-          echo "DIAGNOSTIC: Applying patch to ${RCUTILS_CMAKE_FILE} to remove filesystem.c..."
+          echo "DIAGNOSTIC: Applying SURGICAL PATCHES to ${RCUTILS_CMAKE_FILE}..."
           
+          # 【核心操作】直接删除问题源文件
+          # 1. 删除 filesystem.c (解决文件系统依赖)
           sed -i '/src\/filesystem.c/d' ${RCUTILS_CMAKE_FILE}
+          # 2. 删除 shared_library.c (解决 dlfcn.h 缺失)
+          sed -i '/src\/shared_library.c/d' ${RCUTILS_CMAKE_FILE}
 
-          echo "DIAGNOSTIC: Verifying patch..."
+          echo "DIAGNOSTIC: Verifying patches..."
+          
+          # 验证 Patch 1
           if ! grep -q 'src/filesystem.c' "${RCUTILS_CMAKE_FILE}"; then
-            echo "DIAGNOSTIC: ✅ Patch successfully applied. 'src/filesystem.c' has been removed."
+            echo "DIAGNOSTIC: ✅ Patch 1 applied: 'src/filesystem.c' removed."
           else
-            echo "DIAGNOSTIC: ❌ CRITICAL: Failed to patch ${RCUTILS_CMAKE_FILE}. Aborting."
+            echo "DIAGNOSTIC: ❌ CRITICAL: Failed to remove filesystem.c"
+            exit 1
+          fi
+
+          # 验证 Patch 2
+          if ! grep -q 'src/shared_library.c' "${RCUTILS_CMAKE_FILE}"; then
+            echo "DIAGNOSTIC: ✅ Patch 2 applied: 'src/shared_library.c' removed."
+          else
+            echo "DIAGNOSTIC: ❌ CRITICAL: Failed to remove shared_library.c"
             exit 1
           fi
           
@@ -91,8 +103,7 @@ jobs:
                       "cmake-args": [
                           "-DRCUTILS_USE_CUSTOM_CLOCK=ON",
                           "-DRCUTILS_NO_FILESYSTEM=ON",
-                          "--no-warn-unused-cli",
-                          "-DRCUTILS_ENABLE_SHARED_LIBS_LOADER=OFF"
+                          "--no-warn-unused-cli"
                       ]
                   },
                   "rmw_microxrcedds": {
@@ -104,11 +115,12 @@ jobs:
                   }
               }
           }' > ${META_FILE_PATH}
-          echo "DIAGNOSTIC: colcon.meta content:"
-          cat ${META_FILE_PATH}
 
           echo "DIAGNOSTIC: Starting the final build process..."
+          
+          # 【优化】显式添加 --metas colcon.meta
           colcon build \
+            --metas colcon.meta \
             --merge-install \
             --cmake-args \
               -DBUILD_TESTING=OFF \
@@ -140,4 +152,3 @@ jobs:
         with:
           name: libmicroros-cortex-m4-hard-float
           path: export/
-
