@@ -1,11 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v42 (配置文件清洗版)
+# 描述: v43 (逻辑短路版 - 物理隔绝)
 #
-# 1. 故障根源: 之前的失败表明，即使修改了 CMakeLists.txt，配置依然被覆盖。
-#    这极有可能是因为存在优先级更高的 'client.config' 文件。
-# 2. 解决方案: 在构建前强制删除所有 client.config 文件。
-#    同时保持 CMakeLists.txt 的头部强制注入。
-# 3. 目标: 彻底切断 UDP/TCP 的开启路径。
+# 1. 故障复盘: 即使在 CMakeLists.txt 头部强制设置了 FORCE 变量，构建系统
+#    似乎依然顽固地编译 UDP 代码。可能是 configure_file 机制或后续逻辑覆盖导致。
+# 2. 终极策略: 不再纠结于变量的值。直接修改 CMakeLists.txt 中的逻辑判断语句。
+#    将 "if(UCLIENT_PROFILE_UDP)" 替换为 "if(OFF)"。
+#    这样无论变量是什么，相关源文件都绝对不会被加入编译列表。
+# 3. 结果: 彻底物理隔绝 Linux 传输层代码。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -71,7 +72,7 @@ jobs:
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # PHASE 1: rcutils 修复 (五重切除 - 保持不变)
+          # PHASE 1: rcutils 修复 (保持不变)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -82,24 +83,25 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # PHASE 2: microxrcedds_client 终极修复 (清洗 + 注入)
+          # PHASE 2: microxrcedds_client 终极修复 (逻辑短路)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
           
-          # 1. 【新增】删除可能存在的配置文件干扰
-          echo "DIAGNOSTIC: Scanning and removing 'client.config' files..."
-          find . -name "client.config" -print -delete
+          echo "DIAGNOSTIC: Short-circuiting logic in ${XRCE_CMAKE_FILE}..."
           
-          # 2. 头部强制注入 (双重保险)
-          echo "DIAGNOSTIC: Injecting FORCE OVERRIDES at the top of ${XRCE_CMAKE_FILE}..."
-          sed -i '1i set(UCLIENT_PROFILE_UDP OFF CACHE BOOL "Force Disable UDP" FORCE)' ${XRCE_CMAKE_FILE}
-          sed -i '1i set(UCLIENT_PROFILE_TCP OFF CACHE BOOL "Force Disable TCP" FORCE)' ${XRCE_CMAKE_FILE}
-          sed -i '1i set(UCLIENT_PROFILE_SERIAL OFF CACHE BOOL "Force Disable Serial" FORCE)' ${XRCE_CMAKE_FILE}
-          sed -i '1i set(UCLIENT_PROFILE_CUSTOM_TRANSPORT ON CACHE BOOL "Force Enable Custom" FORCE)' ${XRCE_CMAKE_FILE}
+          # 1. 将 if(UCLIENT_PROFILE_UDP) 替换为 if(OFF)
+          sed -i 's/if(UCLIENT_PROFILE_UDP)/if(OFF)/g' ${XRCE_CMAKE_FILE}
+          sed -i 's/if(UCLIENT_PROFILE_TCP)/if(OFF)/g' ${XRCE_CMAKE_FILE}
+          sed -i 's/if(UCLIENT_PROFILE_SERIAL)/if(OFF)/g' ${XRCE_CMAKE_FILE}
+          
+          # 2. 强制开启 Custom Transport
+          # 找到 if(UCLIENT_PROFILE_CUSTOM_TRANSPORT) 并替换为 if(ON)
+          sed -i 's/if(UCLIENT_PROFILE_CUSTOM_TRANSPORT)/if(ON)/g' ${XRCE_CMAKE_FILE}
 
-          # 3. 验证注入
-          head -n 5 ${XRCE_CMAKE_FILE}
+          # 3. 验证修改
+          echo "DIAGNOSTIC: Verifying Logic Short-circuit:"
+          grep "if(OFF)" ${XRCE_CMAKE_FILE} || echo "WARNING: Short-circuit failed?"
 
           # 4. 处理 time.c
           XRCE_TIME_FILE="${XRCE_CLIENT_PATH}/src/c/util/time.c"
@@ -150,20 +152,17 @@ jobs:
             
             echo "DIAGNOSTIC: 🔍 Inspecting Library Symbols..."
             
-            # 验证 UDP 符号是否彻底消失
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "udp_transport"; then
-                echo "  [FAIL] UDP symbols STILL found! Override failed."
+                echo "  [FAIL] UDP symbols STILL found! Short-circuit failed."
                 exit 1
             else
-                echo "  [OK] UDP symbols GONE. Override success."
+                echo "  [OK] UDP symbols GONE. Logic Short-circuit success."
             fi
             
-            # 验证关键函数存在
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
                 echo "  [OK] uxr_init_session found."
             fi
             
-            # 验证时间函数未定义
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "U uxr_millis"; then
                 echo "  [OK] uxr_millis is Undefined (Correct behavior)."
             fi
