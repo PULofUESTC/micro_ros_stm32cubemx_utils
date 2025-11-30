@@ -1,11 +1,11 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v41 (头部强制注入版 - 终极方案)
+# 描述: v42 (配置文件清洗版)
 #
-# 1. 核心策略: 利用 CMake 机制的最高优先级——在 CMakeLists.txt 第一行
-#    插入 set(... CACHE ... FORCE) 指令。
-# 2. 目的: 这将无视任何外部命令行参数(-D)或默认配置，强制关闭 UDP/TCP/Serial，
-#    并强制开启 Custom Transport。
-# 3. 结果: 生成适用于 STM32F405 (UART通信) 的纯净静态库。
+# 1. 故障根源: 之前的失败表明，即使修改了 CMakeLists.txt，配置依然被覆盖。
+#    这极有可能是因为存在优先级更高的 'client.config' 文件。
+# 2. 解决方案: 在构建前强制删除所有 client.config 文件。
+#    同时保持 CMakeLists.txt 的头部强制注入。
+# 3. 目标: 彻底切断 UDP/TCP 的开启路径。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -55,7 +55,6 @@ jobs:
           TOOLCHAIN_PATH="${PWD}/firmware/stm32_hardfloat.cmake" 
           echo "DIAGNOSTIC: Creating toolchain file at: ${TOOLCHAIN_PATH}"
           
-          # 定义 Cortex-M4 Hard-Float 工具链
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -72,7 +71,7 @@ jobs:
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # PHASE 1: rcutils 修复 (五重切除 - 针对裸机环境)
+          # PHASE 1: rcutils 修复 (五重切除 - 保持不变)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -83,28 +82,26 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # PHASE 2: microxrcedds_client 终极修复 (头部强制注入)
+          # PHASE 2: microxrcedds_client 终极修复 (清洗 + 注入)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
           
+          # 1. 【新增】删除可能存在的配置文件干扰
+          echo "DIAGNOSTIC: Scanning and removing 'client.config' files..."
+          find . -name "client.config" -print -delete
+          
+          # 2. 头部强制注入 (双重保险)
           echo "DIAGNOSTIC: Injecting FORCE OVERRIDES at the top of ${XRCE_CMAKE_FILE}..."
-          
-          # 1. 在文件第一行插入 set(... FORCE) 指令。
-          # 这利用了 CMake 的机制：FORCE Set 优先级高于命令行参数。
-          # 无论外部脚本如何调用 cmake -D...，这里的值都会覆盖它。
-          
-          # 注意顺序：倒序插入，确保最后结果是按顺序排列在头部
-          sed -i '1i set(UCLIENT_PROFILE_CUSTOM_TRANSPORT ON CACHE BOOL "Force Enable Custom" FORCE)' ${XRCE_CMAKE_FILE}
-          sed -i '1i set(UCLIENT_PROFILE_SERIAL OFF CACHE BOOL "Force Disable Serial" FORCE)' ${XRCE_CMAKE_FILE}
-          sed -i '1i set(UCLIENT_PROFILE_TCP OFF CACHE BOOL "Force Disable TCP" FORCE)' ${XRCE_CMAKE_FILE}
           sed -i '1i set(UCLIENT_PROFILE_UDP OFF CACHE BOOL "Force Disable UDP" FORCE)' ${XRCE_CMAKE_FILE}
+          sed -i '1i set(UCLIENT_PROFILE_TCP OFF CACHE BOOL "Force Disable TCP" FORCE)' ${XRCE_CMAKE_FILE}
+          sed -i '1i set(UCLIENT_PROFILE_SERIAL OFF CACHE BOOL "Force Disable Serial" FORCE)' ${XRCE_CMAKE_FILE}
+          sed -i '1i set(UCLIENT_PROFILE_CUSTOM_TRANSPORT ON CACHE BOOL "Force Enable Custom" FORCE)' ${XRCE_CMAKE_FILE}
 
-          # 2. 打印文件头 10 行以验证插入结果
-          echo "DIAGNOSTIC: Verifying Header Injection:"
-          head -n 10 ${XRCE_CMAKE_FILE}
+          # 3. 验证注入
+          head -n 5 ${XRCE_CMAKE_FILE}
 
-          # 3. 处理 time.c (防止 POSIX 时间调用)
+          # 4. 处理 time.c
           XRCE_TIME_FILE="${XRCE_CLIENT_PATH}/src/c/util/time.c"
           echo "DIAGNOSTIC: Neutralizing ${XRCE_TIME_FILE}..."
           echo "/* Content removed. User must implement uxr_millis */" > ${XRCE_TIME_FILE}
@@ -153,7 +150,7 @@ jobs:
             
             echo "DIAGNOSTIC: 🔍 Inspecting Library Symbols..."
             
-            # 1. 验证 UDP 符号是否彻底消失 (关键指标)
+            # 验证 UDP 符号是否彻底消失
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "udp_transport"; then
                 echo "  [FAIL] UDP symbols STILL found! Override failed."
                 exit 1
@@ -161,12 +158,12 @@ jobs:
                 echo "  [OK] UDP symbols GONE. Override success."
             fi
             
-            # 2. 验证关键函数存在
+            # 验证关键函数存在
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
                 echo "  [OK] uxr_init_session found."
             fi
             
-            # 3. 验证时间函数未定义 (确保留给用户实现)
+            # 验证时间函数未定义
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "U uxr_millis"; then
                 echo "  [OK] uxr_millis is Undefined (Correct behavior)."
             fi
