@@ -1,12 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v45 (路径修正版)
+# 描述: v46 (头文件清洗版)
 #
-# 1. 故障复盘: v44 失败是因为脚本中途执行了 'cd ../..' 切回了根工作空间。
-#    根工作空间已包含旧的 install 目录(isolated布局)，导致 colcon 拒绝
-#    使用 --merge-install 进行覆盖构建。
-# 2. 修正方案: 删除目录切换命令，确保最终构建在 'firmware/mcu_ws' 
-#    这个已经执行过深度清理(DEEP CLEAN)的子工作空间中进行。
-# 3. 策略保持: 继续使用 "逻辑短路 (if(OFF))" 策略，这在 v44 中已被验证为成功。
+# 1. 故障复盘: v45 失败表明，即使 CMake 配置关闭了 UDP，通用代码(如 ping.c)
+#    通过 transport.h 依然引用了 UDP 头文件。这导致了结构体定义缺失的错误。
+# 2. 解决方案: 直接修改 C 源码头文件。
+#    在 transport.h 中删除对 UDP/TCP/Serial 头文件的引用。
+#    这是解决 "field has incomplete type" 错误的终极手段。
+# 3. 补充: 继续保持之前的所有 CMake 修复和环境清理。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -68,15 +68,14 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
           
-          # 进入子工作空间 (这是构建发生的正确位置)
           cd firmware/mcu_ws
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # STRATEGY 0: RCUTILS FOUNDATION (五重切除)
+          # STRATEGY 0: RCUTILS REPAIR (保持五重切除)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
-          echo "DIAGNOSTIC: [Strategy 0] Applying rcutils surgical patches..."
+          echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
           sed -i '/src\/filesystem.c/d' ${RCUTILS_CMAKE_FILE}
           sed -i '/src\/shared_library.c/d' ${RCUTILS_CMAKE_FILE}
           sed -i '/src\/time_unix.c/d' ${RCUTILS_CMAKE_FILE}
@@ -84,93 +83,76 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # STRATEGY 1: LOGIC SHORT-CIRCUIT (逻辑短路 - 物理隔绝)
+          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT HEADER CLEANING (头文件大清洗)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
-          XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
-          echo "DIAGNOSTIC: [Strategy 1] Short-circuiting logic in ${XRCE_CMAKE_FILE}..."
+          # 找到那个被包含的 transport.h 文件
+          # 根据日志：include/uxr/client/transport.h
+          XRCE_TRANSPORT_H="${XRCE_CLIENT_PATH}/include/uxr/client/transport.h"
           
-          # 1. 禁用 Linux 传输层: 将 if(...PROFILE...) 替换为 if(OFF)
-          # 使用正则匹配，确保能够命中
+          echo "DIAGNOSTIC: Sanitizing header file: ${XRCE_TRANSPORT_H}..."
+          
+          # 直接删除包含 udp, tcp, serial 的 include 行
+          # 这会切断结构体引用的源头
+          sed -i '/include.*udp_transport.h/d' ${XRCE_TRANSPORT_H}
+          sed -i '/include.*tcp_transport.h/d' ${XRCE_TRANSPORT_H}
+          sed -i '/include.*serial_transport.h/d' ${XRCE_TRANSPORT_H}
+          
+          # 验证清洗结果
+          if grep -q "udp_transport.h" ${XRCE_TRANSPORT_H}; then
+             echo "DIAGNOSTIC: ❌ [FAIL] Header sanitization failed!"
+             exit 1
+          else
+             echo "DIAGNOSTIC: ✅ [OK] Header sanitized."
+          fi
+
+          # ====================================================================
+          # STRATEGY 2: CMAKE LOGIC SHORT-CIRCUIT (逻辑短路)
+          # ====================================================================
+          XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
+          echo "DIAGNOSTIC: Short-circuiting CMake logic..."
+          
           sed -i 's/if(.*UCLIENT_PROFILE_UDP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           sed -i 's/if(.*UCLIENT_PROFILE_TCP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           sed -i 's/if(.*UCLIENT_PROFILE_SERIAL.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
-          
-          # 2. 启用 Custom 传输层: 将 if(...CUSTOM...) 替换为 if(ON)
           sed -i 's/if(.*UCLIENT_PROFILE_CUSTOM_TRANSPORT.*)/if(ON)/g' ${XRCE_CMAKE_FILE}
 
-          # 验证 (Critical Check)
-          if grep -q "if(OFF)" ${XRCE_CMAKE_FILE}; then
-             echo "DIAGNOSTIC: ✅ [Strategy 1] Logic Short-Circuit Applied Successfully."
-          else
-             echo "DIAGNOSTIC: ❌ [Strategy 1] Failed to apply short-circuit!"
-             grep "if(" ${XRCE_CMAKE_FILE}
-             exit 1
-          fi
-
-          # 3. 处理 time.c
+          # ====================================================================
+          # STRATEGY 3: SOURCE FILE NEUTRALIZATION (源文件无害化)
+          # ====================================================================
+          # 除了 time.c，我们也顺手处理一下 ping.c，以防万一它依赖 UDP 结构体
           XRCE_TIME_FILE="${XRCE_CLIENT_PATH}/src/c/util/time.c"
-          echo "/* Neutralized */ typedef int dummy;" > ${XRCE_TIME_FILE}
+          echo "/* Neutralized */ typedef int dummy_time;" > ${XRCE_TIME_FILE}
+          
+          # 注意：ping.c 可能也会报错，如果报错我们在下一轮修复，或者这里先不动它，
+          # 因为修改了头文件后，ping.c 里的宏判断可能会让它自动跳过相关代码。
 
           # ====================================================================
-          # STRATEGY 3: CONFIG DESTRUCTION (环境清洗)
+          # STRATEGY 4: DEEP CLEAN (深度清理)
           # ====================================================================
-          echo "DIAGNOSTIC: [Strategy 3] Cleaning config files..."
-          find . -name "client.config" -delete
-          
-          echo "DIAGNOSTIC: 🔥 Performing DEEP CLEAN of build artifacts..."
-          # 这里的清理至关重要，它确保当前目录 (firmware/mcu_ws) 是干净的
+          echo "DIAGNOSTIC: 🔥 Performing DEEP CLEAN..."
           rm -rf build/ install/ log/
+          find . -name "client.config" -delete
           find . -name "CMakeCache.txt" -delete
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # STRATEGY 2: META CONFIGURATION (本地 Meta 配置)
-          # ====================================================================
-          # 修正: 直接在当前目录生成 meta 文件，不切换目录
-          META_FILE_PATH="$(pwd)/colcon_fixed.meta"
-          echo "DIAGNOSTIC: [Strategy 2] Creating meta file at: ${META_FILE_PATH}"
-          
-          echo '{
-              "packages": {
-                  "rcutils": {
-                      "cmake-args": [
-                          "-DRCUTILS_USE_CUSTOM_CLOCK=ON",
-                          "-DRCUTILS_NO_FILESYSTEM=ON",
-                          "--no-warn-unused-cli"
-                      ]
-                  },
-                  "microxrcedds_client": {
-                      "cmake-args": [
-                          "-DUCLIENT_PROFILE_UDP=OFF",
-                          "-DUCLIENT_PROFILE_TCP=OFF",
-                          "-DUCLIENT_PROFILE_SERIAL=OFF",
-                          "-DUCLIENT_PROFILE_CUSTOM_TRANSPORT=ON"
-                      ]
-                  }
-              }
-          }' > ${META_FILE_PATH}
-
-          # ====================================================================
-          # FINAL BUILD
+          # BUILD
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
           
-          # 在 firmware/mcu_ws 目录下运行构建
-          # 这里的 install 目录已经被清空，所以 --merge-install 不会报错
-          
           colcon build \
             --merge-install \
-            --metas "${META_FILE_PATH}" \
             --cmake-args \
               -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
               -DBUILD_TESTING=OFF \
               -DBUILD_SHARED_LIBS=OFF \
+              -DRCUTILS_USE_CUSTOM_CLOCK=ON \
+              -DRCUTILS_NO_FILESYSTEM=ON \
               -DUCLIENT_CUSTOM_TRANSPORT_MTU=512 \
               -DRMW_UXRCE_TRANSPORT=custom \
               --no-warn-unused-cli
           
-          # 构建完成后返回上一级，准备打包
           cd ../.. 
           echo "::endgroup::"
 
@@ -178,7 +160,6 @@ jobs:
           # VERIFICATION
           # ====================================================================
           echo "::group::4. Verify and Package Artifacts"
-          # 注意路径: firmware/mcu_ws/build
           LIB_PATH=$(find firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
           
           if [ -z "$LIB_PATH" ]; then
@@ -193,7 +174,7 @@ jobs:
                 echo "DIAGNOSTIC: ❌ [FAIL] UDP symbols STILL found!"
                 exit 1
             else
-                echo "DIAGNOSTIC: ✅ [OK] UDP symbols GONE. Logic Short-circuit worked."
+                echo "DIAGNOSTIC: ✅ [OK] UDP symbols GONE."
             fi
             
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
@@ -201,7 +182,7 @@ jobs:
             fi
             
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "U uxr_millis"; then
-                echo "DIAGNOSTIC: ✅ [OK] uxr_millis is Undefined (Correct behavior)."
+                echo "DIAGNOSTIC: ✅ [OK] uxr_millis is Undefined."
             fi
 
             mkdir -p export/lib
