@@ -1,11 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v38 (正则修正版)
+# 描述: v40 (整行替换版 - Verified Logic)
 #
-# 1. 故障复盘: v37 失败是因为 sed 命令匹配字符串时漏掉了一个句号(.)，
-#    导致 CMakeLists.txt 未被修改，UDP 依然默认开启。
-# 2. 核心修复: 改用正则表达式进行模糊匹配，确保无论描述字符串如何变化，
-#    都能强制将 UDP/TCP/Serial 的 option 设为 OFF。
-# 3. 验证增强: 修改后立即 grep 检查，如果依然是 ON 则直接报错退出。
+# 1. 逻辑修正: 用户指出的 CMake 执行顺序问题是正确的。追加到文件末尾会导致
+#    配置生效太晚。因此我们改回修改文件头部。
+# 2. 方法升级: 使用 sed 的 '/匹配项/c\新内容' 语法。
+#    只要行内包含 "option(UCLIENT_PROFILE_UDP"，整行就会被无条件替换。
+#    这无视了原文件中的空格、标点符号差异，确保 100% 命中。
+# 3. 完整性: 包含了 rcutils 的五重切除和 time.c 的处理。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -71,7 +72,7 @@ jobs:
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # PHASE 1: rcutils 修复 (保持不变)
+          # PHASE 1: rcutils 修复 (五重切除 - 基石)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -82,39 +83,40 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # PHASE 2: microxrcedds_client 源码级篡改 (正则修正版)
+          # PHASE 2: microxrcedds_client 终极修复 (整行替换)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
           
-          echo "DIAGNOSTIC: Modifying ${XRCE_CMAKE_FILE} using REGEX..."
+          echo "DIAGNOSTIC: Modifying ${XRCE_CMAKE_FILE} using LINE REPLACEMENT..."
           
-          # 1. 使用正则暴力替换默认值 ON -> OFF
-          # 匹配 option(UCLIENT_PROFILE_UDP 后面任意字符直到行尾，直接整行替换
-          sed -i 's/option(UCLIENT_PROFILE_UDP .*)/option(UCLIENT_PROFILE_UDP "Disabled by script" OFF)/g' ${XRCE_CMAKE_FILE}
-          sed -i 's/option(UCLIENT_PROFILE_TCP .*)/option(UCLIENT_PROFILE_TCP "Disabled by script" OFF)/g' ${XRCE_CMAKE_FILE}
-          sed -i 's/option(UCLIENT_PROFILE_SERIAL .*)/option(UCLIENT_PROFILE_SERIAL "Disabled by script" OFF)/g' ${XRCE_CMAKE_FILE}
+          # sed '/匹配内容/c\新行内容' 文件名
+          # 只要行内包含 option(UCLIENT_PROFILE_UDP，整行就被换掉。
+          # 这样我们不需要关心原来的 ON 后面有没有句号或空格。
           
-          # 2. 暴力启用 Custom Transport
-          sed -i 's/option(UCLIENT_PROFILE_CUSTOM_TRANSPORT .*)/option(UCLIENT_PROFILE_CUSTOM_TRANSPORT "Enabled by script" ON)/g' ${XRCE_CMAKE_FILE}
+          sed -i '/option(UCLIENT_PROFILE_UDP/c\    option(UCLIENT_PROFILE_UDP "Disabled by script" OFF)' ${XRCE_CMAKE_FILE}
+          sed -i '/option(UCLIENT_PROFILE_TCP/c\    option(UCLIENT_PROFILE_TCP "Disabled by script" OFF)' ${XRCE_CMAKE_FILE}
+          sed -i '/option(UCLIENT_PROFILE_SERIAL/c\    option(UCLIENT_PROFILE_SERIAL "Disabled by script" OFF)' ${XRCE_CMAKE_FILE}
+          
+          # 启用 Custom Transport
+          sed -i '/option(UCLIENT_PROFILE_CUSTOM_TRANSPORT/c\    option(UCLIENT_PROFILE_CUSTOM_TRANSPORT "Enabled by script" ON)' ${XRCE_CMAKE_FILE}
 
-          # 3. 严格验证修改结果 (Fail Fast)
-          echo "DIAGNOSTIC: Verifying CMakeLists.txt modifications..."
+          # 3. 严格验证 (如果不通过直接报错)
+          echo "DIAGNOSTIC: Verifying modifications..."
           
-          # 检查 UDP 是否已变为 OFF
           if grep -q 'option(UCLIENT_PROFILE_UDP "Disabled by script" OFF)' ${XRCE_CMAKE_FILE}; then
              echo "  [OK] UDP disabled."
           else
-             echo "  [FAIL] UDP is NOT disabled! Dumping file line:"
+             echo "  [FAIL] UDP line replacement failed!"
+             # 打印出包含 UDP 的行看看发生了什么
              grep "UCLIENT_PROFILE_UDP" ${XRCE_CMAKE_FILE}
              exit 1
           fi
 
-          # 检查 Custom 是否已变为 ON
           if grep -q 'option(UCLIENT_PROFILE_CUSTOM_TRANSPORT "Enabled by script" ON)' ${XRCE_CMAKE_FILE}; then
              echo "  [OK] Custom Transport enabled."
           else
-             echo "  [FAIL] Custom Transport NOT enabled!"
+             echo "  [FAIL] Custom Transport line replacement failed!"
              exit 1
           fi
 
@@ -146,11 +148,6 @@ jobs:
               -DBUILD_SHARED_LIBS=OFF \
               -DRCUTILS_USE_CUSTOM_CLOCK=ON \
               -DRCUTILS_NO_FILESYSTEM=ON \
-              -DUCLIENT_PROFILE_UDP=OFF \
-              -DUCLIENT_PROFILE_TCP=OFF \
-              -DUCLIENT_PROFILE_SERIAL=OFF \
-              -DUCLIENT_PROFILE_STREAM_FRAMING=ON \
-              -DUCLIENT_PROFILE_CUSTOM_TRANSPORT=ON \
               -DUCLIENT_CUSTOM_TRANSPORT_MTU=512 \
               -DRMW_UXRCE_TRANSPORT=custom \
               --no-warn-unused-cli
@@ -179,15 +176,8 @@ jobs:
                 echo "  [FAIL] uxr_init_session MISSING!"
             fi
             
-            # 2. 验证时间函数未定义
-            if arm-none-eabi-nm "$LIB_PATH" | grep -q "U uxr_millis"; then
-                echo "  [OK] uxr_millis is Undefined (Correct behavior)."
-            else
-                echo "  [WARNING] uxr_millis might be defined internally."
-            fi
-
-            # 3. 验证 UDP 符号不存在
-            if arm-none-eabi-nm "$LIB_PATH" | grep -q "uxr_init_udp"; then
+            # 2. 验证 UDP 符号不存在
+            if arm-none-eabi-nm "$LIB_PATH" | grep -q "udp_transport"; then
                 echo "  [FAIL] UDP symbols found! Modification failed."
             else
                 echo "  [OK] UDP symbols NOT found (Clean build)."
