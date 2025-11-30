@@ -1,13 +1,11 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v37 (源码级配置篡改版)
+# 描述: v38 (正则修正版)
 #
-# 1. 继承胜利: rcutils 的五重切除术保持不变。
-# 2. 攻克顽疾: 针对 microxrcedds_client 无视命令行参数的问题，
-#    我们直接修改其 CMakeLists.txt 源码，将 UDP/TCP/Serial 的默认值改为 OFF。
-# 3. 细节优化: 
-#    - time.c 加入 dummy typedef 消除警告。
-#    - 显式传入 MTU 参数以防万一。
-#    - 最终进行符号验证。
+# 1. 故障复盘: v37 失败是因为 sed 命令匹配字符串时漏掉了一个句号(.)，
+#    导致 CMakeLists.txt 未被修改，UDP 依然默认开启。
+# 2. 核心修复: 改用正则表达式进行模糊匹配，确保无论描述字符串如何变化，
+#    都能强制将 UDP/TCP/Serial 的 option 设为 OFF。
+# 3. 验证增强: 修改后立即 grep 检查，如果依然是 ON 则直接报错退出。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -73,7 +71,7 @@ jobs:
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # PHASE 1: rcutils 修复 (五重切除 - 已验证)
+          # PHASE 1: rcutils 修复 (保持不变)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -84,31 +82,45 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # PHASE 2: microxrcedds_client 源码级篡改 (关键修复)
+          # PHASE 2: microxrcedds_client 源码级篡改 (正则修正版)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
           
-          echo "DIAGNOSTIC: Modifying ${XRCE_CMAKE_FILE} to force disable Linux transports..."
+          echo "DIAGNOSTIC: Modifying ${XRCE_CMAKE_FILE} using REGEX..."
           
-          # 1. 暴力替换默认值 ON -> OFF
-          # 我们使用极其宽泛的正则匹配，确保能够命中
-          sed -i 's/"Enable UDP transport" ON/"Enable UDP transport" OFF/g' ${XRCE_CMAKE_FILE}
-          sed -i 's/"Enable TCP transport" ON/"Enable TCP transport" OFF/g' ${XRCE_CMAKE_FILE}
-          sed -i 's/"Enable Serial transport" ON/"Enable Serial transport" OFF/g' ${XRCE_CMAKE_FILE}
+          # 1. 使用正则暴力替换默认值 ON -> OFF
+          # 匹配 option(UCLIENT_PROFILE_UDP 后面任意字符直到行尾，直接整行替换
+          sed -i 's/option(UCLIENT_PROFILE_UDP .*)/option(UCLIENT_PROFILE_UDP "Disabled by script" OFF)/g' ${XRCE_CMAKE_FILE}
+          sed -i 's/option(UCLIENT_PROFILE_TCP .*)/option(UCLIENT_PROFILE_TCP "Disabled by script" OFF)/g' ${XRCE_CMAKE_FILE}
+          sed -i 's/option(UCLIENT_PROFILE_SERIAL .*)/option(UCLIENT_PROFILE_SERIAL "Disabled by script" OFF)/g' ${XRCE_CMAKE_FILE}
           
           # 2. 暴力启用 Custom Transport
-          sed -i 's/"Enable Custom transport" OFF/"Enable Custom transport" ON/g' ${XRCE_CMAKE_FILE}
+          sed -i 's/option(UCLIENT_PROFILE_CUSTOM_TRANSPORT .*)/option(UCLIENT_PROFILE_CUSTOM_TRANSPORT "Enabled by script" ON)/g' ${XRCE_CMAKE_FILE}
 
-          # 3. 验证修改
-          echo "DIAGNOSTIC: Checking modified CMakeLists.txt..."
-          grep "Enable UDP transport" ${XRCE_CMAKE_FILE} || echo "UDP option not found!"
-          grep "Enable Custom transport" ${XRCE_CMAKE_FILE} || echo "Custom option not found!"
+          # 3. 严格验证修改结果 (Fail Fast)
+          echo "DIAGNOSTIC: Verifying CMakeLists.txt modifications..."
+          
+          # 检查 UDP 是否已变为 OFF
+          if grep -q 'option(UCLIENT_PROFILE_UDP "Disabled by script" OFF)' ${XRCE_CMAKE_FILE}; then
+             echo "  [OK] UDP disabled."
+          else
+             echo "  [FAIL] UDP is NOT disabled! Dumping file line:"
+             grep "UCLIENT_PROFILE_UDP" ${XRCE_CMAKE_FILE}
+             exit 1
+          fi
+
+          # 检查 Custom 是否已变为 ON
+          if grep -q 'option(UCLIENT_PROFILE_CUSTOM_TRANSPORT "Enabled by script" ON)' ${XRCE_CMAKE_FILE}; then
+             echo "  [OK] Custom Transport enabled."
+          else
+             echo "  [FAIL] Custom Transport NOT enabled!"
+             exit 1
+          fi
 
           # 4. 处理 time.c
           XRCE_TIME_FILE="${XRCE_CLIENT_PATH}/src/c/util/time.c"
           echo "DIAGNOSTIC: Neutralizing ${XRCE_TIME_FILE}..."
-          # 加入 typedef int dummy; 防止空文件警告
           echo "/* Content removed. User must implement uxr_millis */" > ${XRCE_TIME_FILE}
           echo "typedef int dummy_symbol_to_avoid_empty_translation_unit_warning;" >> ${XRCE_TIME_FILE}
 
@@ -125,7 +137,6 @@ jobs:
           # ====================================================================
           # PHASE 4: 构建
           # ====================================================================
-          # 虽然我们修改了源码，但保留命令行参数作为双重保险
           
           colcon build \
             --merge-install \
@@ -160,21 +171,19 @@ jobs:
             echo "DIAGNOSTIC: ✅ SUCCESS! Found library at: $LIB_PATH"
             
             echo "DIAGNOSTIC: 🔍 Inspecting Library Symbols..."
-            # 
             
-            # 1. 验证关键函数存在
+            # 1. 验证关键函数
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
                 echo "  [OK] uxr_init_session found."
             else
                 echo "  [FAIL] uxr_init_session MISSING!"
             fi
             
-            # 2. 验证时间函数未定义 (关键!)
-            # 这意味着 STM32 链接时会报错，直到用户实现了它 —— 这是我们想要的正确行为
+            # 2. 验证时间函数未定义
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "U uxr_millis"; then
                 echo "  [OK] uxr_millis is Undefined (Correct behavior)."
             else
-                echo "  [WARNING] uxr_millis might be defined internally. Check logic."
+                echo "  [WARNING] uxr_millis might be defined internally."
             fi
 
             # 3. 验证 UDP 符号不存在
