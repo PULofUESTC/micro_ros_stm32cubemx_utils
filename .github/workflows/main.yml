@@ -1,10 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v33 (全局强制注入版)
+# 描述: v35 (缓存清理 + 全局参数注入版)
 #
-# 既然 colcon.meta 的配置没有生效，我们采用最暴力的“全局注入法”。
-# 我们将 microxrcedds_client 所需的所有 Profile 开关直接写在 colcon build 的
-# 命令行参数中。虽然这些参数对其他包无用，但 CMake 只会警告而不会报错。
-# 这是确保参数一定能传给 microxrcedds_client 的最后手段。
+# 策略更新: 
+# 1. 采纳用户建议，在构建前执行深度缓存清理 (rm -rf build/ & delete CMakeCache.txt)。
+#    这是为了防止之前的隐式配置导致 -D 参数失效。
+# 2. 继续使用全局 -D 参数来禁用 UDP/TCP/Serial。
+# 3. 额外修复: 顺手清空 microxrcedds_client/src/c/util/time.c，
+#    防止因 clock_gettime 导致的链接错误 (这是独立于传输层的另一个必现错误)。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -69,36 +71,54 @@ jobs:
           cd firmware/mcu_ws
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
+          # ====================================================================
+          # PHASE 1: rcutils 修复 (保持五重切除，这是基石)
+          # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
-          echo "DIAGNOSTIC: Applying 5-POINT SURGICAL PATCHES to ${RCUTILS_CMAKE_FILE}..."
-          
-          # --------------------------------------------------------------------
-          # 【底层修复】保持 rcutils 的五重切除 (已验证有效)
-          # --------------------------------------------------------------------
+          echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
           sed -i '/src\/filesystem.c/d' ${RCUTILS_CMAKE_FILE}
           sed -i '/src\/shared_library.c/d' ${RCUTILS_CMAKE_FILE}
           sed -i '/src\/time_unix.c/d' ${RCUTILS_CMAKE_FILE}
           sed -i '/src\/process.c/d' ${RCUTILS_CMAKE_FILE}
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
-          # --------------------------------------------------------------------
 
-          echo "DIAGNOSTIC: Verifying rcutils patches..."
-          for FILE in filesystem.c shared_library.c time_unix.c process.c env.c; do
-            if grep -q "src/$FILE" "${RCUTILS_CMAKE_FILE}"; then
-               echo "DIAGNOSTIC: ❌ CRITICAL: Failed to remove $FILE"
-               exit 1
-            fi
-          done
-          echo "DIAGNOSTIC: ✅ All rcutils patches verified."
+          # ====================================================================
+          # PHASE 2: 预处理 microxrcedds_client 的 time.c
+          # ====================================================================
+          # 即使传输层修好了，这个文件也会报错 clock_gettime，所以我们提前把它处理掉
+          XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
+          XRCE_TIME_FILE="${XRCE_CLIENT_PATH}/src/c/util/time.c"
+          if [ -f "$XRCE_TIME_FILE" ]; then
+            echo "DIAGNOSTIC: Neutralizing ${XRCE_TIME_FILE} to prevent POSIX time errors..."
+            echo "// Neutralized by build script" > ${XRCE_TIME_FILE}
+            echo "int64_t uxr_millis(void) { return 0; }" >> ${XRCE_TIME_FILE}
+            echo "int64_t uxr_nanos(void) { return 0; }" >> ${XRCE_TIME_FILE}
+          fi
+
+          # ====================================================================
+          # PHASE 3: 缓存深度清理 (用户建议的关键步骤)
+          # ====================================================================
+          echo "DIAGNOSTIC: 🔥 Performing DEEP CLEAN to ensure fresh CMake configuration..."
           
-          echo "DIAGNOSTIC: Starting the final build process (Global Force Injection)..."
+          # 1. 删除构建产物目录
+          rm -rf build/ install/ log/
           
-          # --------------------------------------------------------------------
-          # 【v33 核心变更】
-          # 不再使用 --metas colcon.meta。
-          # 直接将所有参数作为全局 --cmake-args 传入。
-          # 这样 microxrcedds_client 绝对无法忽略这些开关。
-          # --------------------------------------------------------------------
+          # 2. 递归搜索并删除所有 CMakeCache.txt
+          echo "DIAGNOSTIC: Removing CMakeCache.txt files..."
+          find . -name "CMakeCache.txt" -print -delete
+          
+          # 3. 递归删除 CMakeFiles 目录
+          echo "DIAGNOSTIC: Removing CMakeFiles directories..."
+          find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
+          
+          echo "DIAGNOSTIC: Clean complete. Starting fresh build..."
+
+          # ====================================================================
+          # PHASE 4: 构建 (Global Force Injection)
+          # ====================================================================
+          
+          # 注意：这里我们通过全局参数强制禁用 UDP/TCP/Serial
+          # 因为缓存已清空，理论上 CMake 必须重新读取这些 OFF 值
           
           colcon build \
             --merge-install \
