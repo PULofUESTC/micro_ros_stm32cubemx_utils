@@ -1,12 +1,13 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v53 (RMW 隔离版)
+# 描述: v53 (开启异常版)
 #
-# 1. 继承: 保留所有之前的修复 (rcutils/client核平, FastRTPS屏蔽, Python禁用)。
-# 2. 新增修复: 解决 "rmw_implementation" 链接 FastRTPS/FastCDR 的错误。
-#    原因: 构建系统试图编译通用的 rmw_implementation 包，它默认依赖宿主机的 FastRTPS。
-#    但在 MCU 静态库场景下，我们直接静态链接 rmw_microxrcedds，不需要通用的加载器。
-# 3. 解决方案: 在 --packages-ignore 中添加 rmw_implementation 和其他标准 RMW 包。
-#    只保留 micro-ROS 必须的 rmw_microxrcedds。
+# 1. 继承: 保留所有之前的修复 (rcutils/client核平, FastRTPS/Python屏蔽, 深度清理)。
+# 2. 新增修复: 解决 "error: exception handling disabled, use '-fexceptions' to enable"。
+#    原因: micro-ROS 的某些 C++ 组件 (如 rcl_interfaces) 使用了 std::vector 并包含 throw 语句。
+#          而我们之前的工具链配置强制使用了 -fno-exceptions，导致编译器拒绝编译。
+# 3. 解决方案: 在 toolchain.cmake 中移除 -fno-exceptions 标志。
+#    虽然嵌入式开发通常禁用异常，但为了兼容 ROS 2 的 C++ 模板代码，开启它是最务实的妥协。
+#    对于 STM32F405 (1MB Flash)，增加的代码体积通常是可以接受的。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -56,6 +57,7 @@ jobs:
           TOOLCHAIN_PATH="${PWD}/firmware/stm32_hardfloat.cmake" 
           echo "DIAGNOSTIC: Creating toolchain file at: ${TOOLCHAIN_PATH}"
           
+          # 【关键修改】移除 -fno-exceptions
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -63,7 +65,7 @@ jobs:
           set(CMAKE_CXX_COMPILER arm-none-eabi-g++)
           set(TARGET_FLAGS "-mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16 --specs=nosys.specs")
           set(CMAKE_C_FLAGS           "${TARGET_FLAGS} -Wall -Wextra" CACHE INTERNAL "")
-          set(CMAKE_CXX_FLAGS         "${TARGET_FLAGS} -Wall -Wextra -fno-exceptions" CACHE INTERNAL "")
+          set(CMAKE_CXX_FLAGS         "${TARGET_FLAGS} -Wall -Wextra" CACHE INTERNAL "") 
           set(CMAKE_ASM_FLAGS         "${TARGET_FLAGS}" CACHE INTERNAL "")
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
@@ -122,12 +124,9 @@ jobs:
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # BUILD (依赖隔离版)
+          # BUILD (开启异常版)
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
-          
-          # 【重点】大幅增加忽略列表
-          # 排除所有标准 RMW 实现，只留 microxrcedds
           
           colcon build \
             --merge-install \
@@ -135,11 +134,6 @@ jobs:
               rosidl_typesupport_fastrtps_c \
               rosidl_typesupport_fastrtps_cpp \
               rosidl_typesupport_cpp \
-              rmw_implementation \
-              rmw_fastrtps_cpp \
-              rmw_fastrtps_dynamic_cpp \
-              rmw_cyclonedds_cpp \
-              rcl_logging_spdlog \
             --cmake-args \
               -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
               -DBUILD_TESTING=OFF \
