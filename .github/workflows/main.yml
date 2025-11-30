@@ -1,13 +1,14 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v55 (RMW 强制指定版)
+# 描述: v56 (动态路径修复版)
 #
-# 1. 继承: 保留所有之前的有效修复 (rcutils/client核平, Python/FastRTPS屏蔽, 深度清理)。
-# 2. 新增修复: 解决 rmw_implementation 寻找 FastRTPS 失败的问题。
-#    原因: 即使我们指定了 RMW_IMPLEMENTATION，构建脚本依然会尝试查找默认的 FastRTPS (REQUIRED)。
-#    当我们屏蔽 FastRTPS 时，REQUIRED 检查导致报错。
-# 3. 解决方案: 直接修改 rmw_implementation 的 CMake 逻辑。
-#    强制将 get_default_rmw_implementation.cmake 中的逻辑短路，直接返回 rmw_microxrcedds。
-#    这避免了它去寻找 FastRTPS。
+# 1. 修复: 解决了 v55 中 "No such file or directory" 的错误。
+#    不再硬编码 rmw_implementation 的路径，而是使用 find 命令动态查找
+#    get_default_rmw_implementation.cmake 文件。
+# 2. 策略: 
+#    - rcutils: 五重切除 (保持)
+#    - microxrcedds: 源码配置篡改 + 头文件清洗 (保持)
+#    - rmw_implementation: 动态定位并篡改 CMake 逻辑，强制返回 rmw_microxrcedds (修复)
+#    - 库合并: 编译完成后自动合并为 libmicroros.a (保持)
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -36,6 +37,9 @@ jobs:
       - name: Create, Build and Package micro-ROS
         shell: bash
         run: |
+          # 锁定根目录
+          PROJECT_ROOT=$(pwd)
+          
           source /opt/ros/humble/setup.bash
 
           echo "::group::1. Prepare and build the micro_ros_setup tool"
@@ -57,6 +61,7 @@ jobs:
           TOOLCHAIN_PATH="${PWD}/firmware/stm32_hardfloat.cmake" 
           echo "DIAGNOSTIC: Creating toolchain file at: ${TOOLCHAIN_PATH}"
           
+          # 开启异常支持 (-fno-exceptions 已移除)
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -73,7 +78,7 @@ jobs:
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # STRATEGY 0: RCUTILS REPAIR (保持不变)
+          # STRATEGY 0: RCUTILS REPAIR (五重切除)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -84,15 +89,17 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT REPAIR (保持不变)
+          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT REPAIR (头文件清洗 + 源码篡改)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           XRCE_TRANSPORT_H="${XRCE_CLIENT_PATH}/include/uxr/client/transport.h"
+          
           echo "DIAGNOSTIC: Sanitizing header file: ${XRCE_TRANSPORT_H}..."
           sed -i '/include.*udp_transport.h/d' ${XRCE_TRANSPORT_H}
           sed -i '/include.*tcp_transport.h/d' ${XRCE_TRANSPORT_H}
           sed -i '/include.*serial_transport.h/d' ${XRCE_TRANSPORT_H}
 
+          # 源码核平 (防止僵尸代码编译)
           FILES_TO_NUKE=(
             "src/c/profile/transport/ip/udp/udp_transport.c"
             "src/c/profile/transport/ip/tcp/tcp_transport.c"
@@ -107,6 +114,7 @@ jobs:
             fi
           done
 
+          # CMake 配置篡改 (双重保险)
           XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
           sed -i 's/if(.*UCLIENT_PROFILE_UDP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           sed -i 's/if(.*UCLIENT_PROFILE_TCP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
@@ -114,24 +122,27 @@ jobs:
           sed -i 's/if(.*UCLIENT_PROFILE_CUSTOM_TRANSPORT.*)/if(ON)/g' ${XRCE_CMAKE_FILE}
 
           # ====================================================================
-          # STRATEGY 2: RMW IMPLEMENTATION FIX (新增修复)
+          # STRATEGY 2: RMW IMPLEMENTATION FIX (动态路径修复版)
           # ====================================================================
-          # 目标: 篡改 get_default_rmw_implementation.cmake
-          # 路径: ros2/rmw_implementation/rmw_implementation_cmake/cmake/get_default_rmw_implementation.cmake
+          echo "DIAGNOSTIC: Locating get_default_rmw_implementation.cmake..."
           
-          RMW_CMAKE_FILE="ros2/rmw_implementation/rmw_implementation_cmake/cmake/get_default_rmw_implementation.cmake"
-          echo "DIAGNOSTIC: Hijacking RMW detection logic in ${RMW_CMAKE_FILE}..."
+          # 使用 find 动态查找文件，只取第一个结果
+          RMW_CMAKE_FILE=$(find . -name "get_default_rmw_implementation.cmake" | head -n 1)
           
-          # 我们直接重写这个文件，让它只返回 rmw_microxrcedds
-          # 这样它就不会去 check FastRTPS 是否存在了
-          echo '
-          function(get_default_rmw_implementation _ret_var)
-            set(${_ret_var} "rmw_microxrcedds" PARENT_SCOPE)
-          endfunction()
-          ' > ${RMW_CMAKE_FILE}
-          
-          echo "DIAGNOSTIC: RMW logic hijacked. Content preview:"
-          cat ${RMW_CMAKE_FILE}
+          if [ -z "$RMW_CMAKE_FILE" ]; then
+            echo "DIAGNOSTIC: [WARNING] get_default_rmw_implementation.cmake not found. Skipping RMW patch (maybe not needed?)"
+          else
+            echo "DIAGNOSTIC: Hijacking RMW detection logic in ${RMW_CMAKE_FILE}..."
+            
+            # 强制覆盖文件内容
+            echo '
+            function(get_default_rmw_implementation _ret_var)
+              set(${_ret_var} "rmw_microxrcedds" PARENT_SCOPE)
+            endfunction()
+            ' > "${RMW_CMAKE_FILE}"
+            
+            echo "DIAGNOSTIC: RMW logic hijacked."
+          fi
 
           # ====================================================================
           # STRATEGY 4: DEEP CLEAN
@@ -146,8 +157,6 @@ jobs:
           # BUILD
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
-          
-          # 依然保持屏蔽，以防万一
           
           colcon build \
             --merge-install \
@@ -181,27 +190,26 @@ jobs:
           echo "::endgroup::"
           
           # ====================================================================
-          # MERGE LIBRARIES (关键步骤)
+          # MERGE & PACKAGE
           # ====================================================================
-          # 之前的 v55 脚本中已经包含了合并逻辑，这里必须加上
           echo "::group::4. Merge and Package Artifacts"
           
-          # 1. 准备导出目录
-          cd ../.. 
-          mkdir -p export/lib
-          mkdir -p export/include
+          # 1. 准备根目录的 export 文件夹
+          mkdir -p "$PROJECT_ROOT/export/lib"
+          mkdir -p "$PROJECT_ROOT/export/include"
           
-          # 2. 进入安装目录
-          INSTALL_LIB_DIR="firmware/mcu_ws/install/lib"
+          # 2. 检查安装目录
+          INSTALL_LIB_DIR="install/lib"
           if [ ! -d "$INSTALL_LIB_DIR" ]; then
              echo "DIAGNOSTIC: ❌ FATAL: Install directory not found!"
+             ls -R
              exit 1
           fi
           
           cd "$INSTALL_LIB_DIR"
           echo "DIAGNOSTIC: Merging static libraries in $(pwd)..."
           
-          # 3. 创建 MRI 脚本 (排除 libmicroros.a 自身以防重入)
+          # 3. MRI 合并
           echo "create libmicroros.a" > lib.mri
           find . -maxdepth 1 -name "*.a" -print0 | while IFS= read -r -d '' file; do
               if [ "$file" != "./libmicroros.a" ]; then
@@ -211,9 +219,9 @@ jobs:
           echo "save" >> lib.mri
           echo "end" >> lib.mri
           
-          # 4. 执行合并
           arm-none-eabi-ar -M < lib.mri
           
+          # 4. 验证与导出
           if [ -f "libmicroros.a" ]; then
              echo "DIAGNOSTIC: ✅ SUCCESS! libmicroros.a created."
              
@@ -224,12 +232,14 @@ jobs:
                 echo "DIAGNOSTIC: [WARNING] Library might be empty or invalid."
              fi
              
-             # 移动产物
-             mv libmicroros.a ../../../../export/lib/
-             cd ../include
-             cp -r * ../../../../export/include/
+             # 移动到根目录的 export
+             cp libmicroros.a "$PROJECT_ROOT/export/lib/"
              
-             echo "DIAGNOSTIC: Artifacts packaged successfully."
+             # 拷贝头文件
+             cd ../include
+             cp -r * "$PROJECT_ROOT/export/include/"
+             
+             echo "DIAGNOSTIC: Artifacts successfully packaged."
           else
              echo "DIAGNOSTIC: ❌ FATAL: Failed to create libmicroros.a"
              exit 1
