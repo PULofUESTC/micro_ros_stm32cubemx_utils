@@ -1,4 +1,4 @@
-name: Build micro-ROS Static Library (F405 Hard-Float)
+name: Build micro-ROS (Force Hard-Float)
 
 on: 
   workflow_dispatch:
@@ -13,51 +13,48 @@ jobs:
           repository: micro-ROS/micro_ros_stm32cubemx_utils
           ref: humble
 
-      - name: Build libmicroros.a using Docker
+      # 1. 运行 Docker 编译 (核心修改部分)
+      - name: Build libmicroros.a with Explicit CFLAGS
         run: |
-          mkdir -p microros_static_library_ide/lib/microros
-          chmod -R 777 microros_static_library_ide
-          
-          # 运行 Docker
-          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library \
-            microros/micro_ros_static_library_builder:humble \
-            -d -t cortex_m4 -f hard -p host
-          
-          # 修复权限
-          sudo chown -R $runner:docker microros_static_library_ide || true
-          sudo chmod -R 777 microros_static_library_ide
+          # 1. 定义强制编译参数 (Hard-Float + Cortex-M4)
+          # 这是解决 V4T 回退问题的关键！
+          export CFLAGS="-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16" 
 
-      # [修正版] 智能查找与归位
-      - name: Find and Move Artifacts
+          # 确保目录存在
+          mkdir -p microros_static_library_ide/lib/microros
+          
+          # 赋予脚本执行权限
+          chmod -R +x microros_static_library_ide/library_generation
+          
+          # 2. 运行 Docker，通过 --cflags 接口传递参数
+          docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library \
+            microros/micro_ros_static_library_builder:humble \
+            -d -p host -t cortex_m4 --cflags "$CFLAGS"
+            
+          # 3. 修复权限
+          sudo chown -R $USER:$USER microros_static_library_ide
+
+      # 4. 验证生成的库 (在云端直接检查，防止下载错的)
+      - name: Verify Architecture (Readelf)
         run: |
-          echo "=== Locating Artifacts ==="
+          sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+          cd microros_static_library_ide/lib/microros
+          ar x libmicroros.a $(ar t libmicroros.a | head -n 1)
+          OBJ_FILE=$(ar t libmicroros.a | head -n 1)
           
-          # 1. 查找库文件 (不论它藏在哪)
-          LIB_SRC=$(find . -name "libmicroros.a" | head -n 1)
-          echo "Found lib at: $LIB_SRC"
-          
-          # 2. 查找 include 文件夹 (通常在库文件旁边)
-          # 我们查找包含 rcl/rcl.h 的 include 目录，确保找对地方
-          INC_SRC=$(find . -type f -name "rcl.h" | grep "/include/rcl/rcl.h" | head -n 1 | sed 's|/rcl/rcl.h||')
-          echo "Found include at: $INC_SRC"
-          
-          if [ -z "$LIB_SRC" ]; then
-            echo "❌ ERROR: libmicroros.a compilation failed!"
+          echo "Checking Tag_ABI_VFP_args for Hard-Float confirmation..."
+          if arm-none-eabi-readelf -A $OBJ_FILE | grep -q "VFP registers"; then
+            echo "✅ SUCCESS: Hard-Float (VFP) architecture detected!"
+          else
+            echo "❌ FATAL ERROR: Hard-Float NOT detected! Check Builder Image Version."
             exit 1
           fi
-          
-          # 3. 搬运到标准出口
-          mkdir -p export/lib
-          mkdir -p export/include
-          
-          cp "$LIB_SRC" export/lib/
-          cp -r "$INC_SRC"/* export/include/
-          
-          echo "✅ Artifacts moved to export/"
-          ls -R export/
 
+      # 5. 上传产物
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
           name: libmicroros_hard_float
-          path: export/
+          path: |
+            microros_static_library_ide/lib/microros/libmicroros.a
+            microros_static_library_ide/lib/microros/include/
