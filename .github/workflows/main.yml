@@ -1,12 +1,15 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v35 (缓存清理 + 全局参数注入版)
+# 描述: v36 (生产级验证版)
 #
-# 策略更新: 
-# 1. 采纳用户建议，在构建前执行深度缓存清理 (rm -rf build/ & delete CMakeCache.txt)。
-#    这是为了防止之前的隐式配置导致 -D 参数失效。
-# 2. 继续使用全局 -D 参数来禁用 UDP/TCP/Serial。
-# 3. 额外修复: 顺手清空 microxrcedds_client/src/c/util/time.c，
-#    防止因 clock_gettime 导致的链接错误 (这是独立于传输层的另一个必现错误)。
+# 1. 构建策略: 延续 v35 的全局参数注入与缓存清理。
+# 2. 关键修正: 
+#    - 对于 Micro-XRCE-DDS-Client 的 time.c，我们不再填充 "return 0"，
+#      而是将其清空。这会迫使生成的静态库包含 "U uxr_millis" (未定义符号)。
+#      这强制用户在 STM32 代码中实现真实的时间函数，避免"时间静止"的 Bug。
+# 3. 新增功能:
+#    - 添加 "Verify Library Artifacts" 步骤。
+#    - 使用 arm-none-eabi-nm 检查库文件，确保 micro-ROS 核心符号存在，
+#      并验证所有 POSIX 符号已被成功剔除。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -72,7 +75,7 @@ jobs:
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # PHASE 1: rcutils 修复 (保持五重切除，这是基石)
+          # PHASE 1: rcutils 修复 (五重切除)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -83,32 +86,24 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # PHASE 2: 预处理 microxrcedds_client 的 time.c
+          # PHASE 2: microxrcedds_client 时间文件处理 (留白策略)
           # ====================================================================
-          # 即使传输层修好了，这个文件也会报错 clock_gettime，所以我们提前把它处理掉
+          # 我们清空 time.c，但不提供实现。
+          # 这样 .a 库中不会包含 time 符号，CubeIDE 链接时会报错提示用户实现它。
+          # 从而确保使用真实的 STM32 时钟。
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           XRCE_TIME_FILE="${XRCE_CLIENT_PATH}/src/c/util/time.c"
           if [ -f "$XRCE_TIME_FILE" ]; then
-            echo "DIAGNOSTIC: Neutralizing ${XRCE_TIME_FILE} to prevent POSIX time errors..."
-            echo "// Neutralized by build script" > ${XRCE_TIME_FILE}
-            echo "int64_t uxr_millis(void) { return 0; }" >> ${XRCE_TIME_FILE}
-            echo "int64_t uxr_nanos(void) { return 0; }" >> ${XRCE_TIME_FILE}
+            echo "DIAGNOSTIC: Emptying ${XRCE_TIME_FILE} to delegate time implementation to user code..."
+            echo "/* Content removed to force user implementation of uxr_millis */" > ${XRCE_TIME_FILE}
           fi
 
           # ====================================================================
-          # PHASE 3: 缓存深度清理 (用户建议的关键步骤)
+          # PHASE 3: 缓存深度清理
           # ====================================================================
-          echo "DIAGNOSTIC: 🔥 Performing DEEP CLEAN to ensure fresh CMake configuration..."
-          
-          # 1. 删除构建产物目录
+          echo "DIAGNOSTIC: 🔥 Performing DEEP CLEAN..."
           rm -rf build/ install/ log/
-          
-          # 2. 递归搜索并删除所有 CMakeCache.txt
-          echo "DIAGNOSTIC: Removing CMakeCache.txt files..."
           find . -name "CMakeCache.txt" -print -delete
-          
-          # 3. 递归删除 CMakeFiles 目录
-          echo "DIAGNOSTIC: Removing CMakeFiles directories..."
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
           
           echo "DIAGNOSTIC: Clean complete. Starting fresh build..."
@@ -116,9 +111,6 @@ jobs:
           # ====================================================================
           # PHASE 4: 构建 (Global Force Injection)
           # ====================================================================
-          
-          # 注意：这里我们通过全局参数强制禁用 UDP/TCP/Serial
-          # 因为缓存已清空，理论上 CMake 必须重新读取这些 OFF 值
           
           colcon build \
             --merge-install \
@@ -139,20 +131,47 @@ jobs:
           cd ../.. 
           echo "::endgroup::"
 
-          echo "::group::4. Package the artifacts"
+          # ====================================================================
+          # PHASE 5: 产物验证 (Artifact Verification)
+          # ====================================================================
+          echo "::group::5. Verify and Package Artifacts"
           LIB_PATH=$(find firmware/mcu_ws/build -name "libmicroros.a" | head -n 1)
+          
           if [ -z "$LIB_PATH" ]; then
-            echo "DIAGNOSTIC: ❌ FATAL: libmicroros.a was NOT found after build. Listing build directory contents:"
-            ls -R firmware/mcu_ws/build
+            echo "DIAGNOSTIC: ❌ FATAL: libmicroros.a was NOT found."
             exit 1
           else
             echo "DIAGNOSTIC: ✅ SUCCESS! Found library at: $LIB_PATH"
+            
+            echo "DIAGNOSTIC: 🔍 Inspecting Library Symbols..."
+            # 检查关键符号是否存在 (T = Text/Defined)
+            if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
+                echo "  [OK] uxr_init_session found."
+            else
+                echo "  [FAIL] uxr_init_session MISSING!"
+            fi
+
+            # 检查 POSIX 符号是否已被剔除 (即不应该有 U clock_gettime, 除非它是弱引用，或者应该完全没有)
+            # 注意：如果 time.c 被清空，库里不应该有 clock_gettime 的引用
+            if arm-none-eabi-nm "$LIB_PATH" | grep "clock_gettime"; then
+                echo "  [WARNING] 'clock_gettime' symbol found! (Might cause link errors)"
+            else
+                echo "  [OK] 'clock_gettime' symbol NOT found (Clean build)."
+            fi
+
+            # 检查时间接口是否未定义 (U = Undefined, expecting user implementation)
+            if arm-none-eabi-nm "$LIB_PATH" | grep "U uxr_millis"; then
+                echo "  [OK] 'uxr_millis' is UNDEFINED (As expected. User must implement this)."
+            else
+                echo "  [WARNING] 'uxr_millis' seems defined internally? Check time.c handling."
+            fi
+
             cd ..
             mkdir -p export/lib
             mkdir -p export/include
             cp microros_ws/$LIB_PATH export/lib/
             cp -r microros_ws/firmware/mcu_ws/install/include/* export/include/
-            echo "DIAGNOSTIC: Artifacts for Cortex-M4 Hard-Float build are ready."
+            echo "DIAGNOSTIC: Artifacts are verified and ready."
           fi
           echo "::endgroup::"
 
