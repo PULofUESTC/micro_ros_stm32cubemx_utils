@@ -1,13 +1,11 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v50 (依赖屏蔽版)
+# 描述: v51 (Python 依赖降级版)
 #
-# 1. 继承: 保留所有之前的修复 (rcutils/client 源码修改, 深度清理)。
-# 2. 新增修复: 解决 "builtin_interfaces" 编译时试图链接 Fast-CDR 的问题。
-#    原因: 系统中预装的 rosidl_typesupport_fastrtps 会自动被 find_package 找到，
-#          进而触发对 ARM 版 Fast-CDR 的查找(失败)。
-# 3. 解决方案: 使用 CMake 的 "CMAKE_DISABLE_FIND_PACKAGE_..." 变量，
-#    强制告诉构建系统：假装 rosidl_typesupport_fastrtps 不存在。
-#    这样生成消息代码时就会自动跳过 FastRTPS 后端。
+# 1. 继承: 保留所有之前的 C/CMake 层面修复 (rcutils切除, client源码篡改, FastRTPS屏蔽)。
+# 2. 新增修复: 解决 "AttributeError: module 'em' has no attribute 'BUFFERED_OPT'" 错误。
+#    原因: 系统自动安装了 empy v4.0+，而 ROS 2 Humble 的构建脚本仅兼容 empy v3.x。
+# 3. 解决方案: 在安装 Python 依赖时，强制指定安装 empy==3.3.4。
+#    这将修复消息生成 (rosidl_adapter) 阶段的崩溃。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -24,9 +22,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git cmake python3-pip gcc-arm-none-eabi
 
-      - name: Install Python Dependencies
+      - name: Install Python Dependencies (Fixed Versions)
         run: |
-          pip3 install -U colcon-common-extensions vcstool
+          # 关键修复: 强制安装兼容的 empy 版本
+          # 同时安装 lark-parser 以防万一 (某些解析器需要)
+          pip3 install -U colcon-common-extensions vcstool "empy==3.3.4" lark
 
       - name: Set up ROS 2 Humble
         uses: ros-tooling/setup-ros@v0.7
@@ -123,12 +123,9 @@ jobs:
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # BUILD (关键变更: 禁用 FastRTPS 查找)
+          # BUILD (依赖屏蔽版)
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
-          
-          # 【重点】使用 CMAKE_DISABLE_FIND_PACKAGE 彻底屏蔽 FastRTPS
-          # 这会迫使 rosidl_default_generators 跳过 FastRTPS 后端生成
           
           colcon build \
             --merge-install \
