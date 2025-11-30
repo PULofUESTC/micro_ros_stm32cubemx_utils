@@ -1,4 +1,4 @@
-name: Build micro-ROS Static Library (F405 Hard-Float)
+name: Build micro-ROS (Diagnostic Mode)
 
 on: 
   workflow_dispatch:
@@ -7,64 +7,82 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 检出官方仓库 (确保有构建脚本)
+      # 1. 检出官方仓库
       - name: Checkout Official Repository
         uses: actions/checkout@v4
         with:
           repository: micro-ROS/micro_ros_stm32cubemx_utils
           ref: humble
 
-      # 2. 准备环境 (强制清理旧文件，防止脚本跳过编译)
-      - name: Prepare Workspace
+      # 2. 诊断：检查初始环境
+      - name: 🔍 Diagnostic - Initial State
         run: |
-          echo "Cleaning previous builds..."
-          sudo rm -rf microros_static_library_ide/lib
-          
-          echo "Creating output directories..."
-          mkdir -p microros_static_library_ide/lib/microros
-          chmod -R 777 microros_static_library_ide
-
-      # 3. 运行 Docker 编译
-      # 注意：我们依然使用 -f hard
-      - name: Build libmicroros.a using Docker
-        run: |
-          echo "Starting Docker build..."
-          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
-
-      # 4. [关键步骤] 全局搜索文件
-      # 不管文件生成在哪，找出它的真实路径，并移动到标准位置
-      - name: Find and Move Artifacts
-        run: |
-          echo "Searching for libmicroros.a..."
-          # 在当前目录下查找 .a 文件
-          LIB_PATH=$(find . -name "libmicroros.a" | head -n 1)
-          
-          if [ -z "$LIB_PATH" ]; then
-            echo "❌ Error: libmicroros.a was NOT found. Build failed."
-            # 列出所有文件帮助调试
-            ls -R
-            exit 1
+          echo "=== Current Directory ==="
+          pwd
+          echo "=== Directory Structure (Level 2) ==="
+          ls -R microros_static_library_ide | grep ":$" | head -n 20
+          echo "=== Check specific script existence ==="
+          if [ -f "microros_static_library_ide/library_generation/library_generation.sh" ]; then
+            echo "✅ Build script FOUND."
           else
-            echo "✅ Found library at: $LIB_PATH"
-            # 确保目标目录存在
-            mkdir -p export/lib
-            mkdir -p export/include
-            
-            # 复制库文件
-            cp "$LIB_PATH" export/lib/
-            
-            # 查找并复制头文件 (include 文件夹)
-            # 通常 include 在库文件的旁边或者上级目录
-            INC_PATH=$(find . -type d -name "include" | grep "microros" | head -n 1)
-            if [ ! -z "$INC_PATH" ]; then
-               cp -r "$INC_PATH"/* export/include/
-               echo "✅ Found include files at: $INC_PATH"
-            fi
+            echo "❌ Build script NOT found!"
+            exit 1
           fi
 
-      # 5. 上传找到的文件
+      # 3. 运行编译 (带权限修复和日志)
+      - name: Build libmicroros.a using Docker
+        run: |
+          echo "=== Preparing Output Directory ==="
+          # 强制清理并重建输出目录
+          sudo rm -rf microros_static_library_ide/lib
+          mkdir -p microros_static_library_ide/lib/microros
+          
+          # 赋予所有脚本执行权限
+          chmod -R +x microros_static_library_ide/library_generation
+          
+          echo "=== Starting Docker Build ==="
+          echo "Target: Cortex-M4, Hard Float"
+          
+          # 运行 Docker
+          # 注意：我们不使用 -q (静默)，我们需要看完整日志
+          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library \
+            microros/micro_ros_static_library_builder:humble \
+            -d -t cortex_m4 -f hard -p host
+          
+          echo "=== Docker Build Finished ==="
+          
+          # 修复权限，防止 ls 或 upload 读不到
+          sudo chown -R $runner:docker microros_static_library_ide/lib || true
+          sudo chmod -R 777 microros_static_library_ide/lib
+
+      # 4. 诊断：构建后文件取证 (这是最关键的一步)
+      - name: 🔍 Diagnostic - Post Build Inspection
+        run: |
+          echo "=== Searching for libmicroros.a (Global Search) ==="
+          # 在当前目录下地毯式搜索 .a 文件
+          find . -name "libmicroros.a" -print0 | xargs -0 ls -lh
+          
+          echo "=== Checking Standard Output Directory ==="
+          TARGET_DIR="microros_static_library_ide/lib/microros"
+          if [ -f "$TARGET_DIR/libmicroros.a" ]; then
+             echo "✅ SUCCESS: Library found in expected location."
+             echo "--- File Stats ---"
+             stat "$TARGET_DIR/libmicroros.a"
+             echo "--- Architecture Check (Basic) ---"
+             # 简单检查文件头，确认不是空文件
+             head -c 20 "$TARGET_DIR/libmicroros.a"
+          else
+             echo "❌ FAILURE: Library NOT found in $TARGET_DIR"
+             echo "=== Listing 'lib' directory content for debugging ==="
+             ls -R microros_static_library_ide/lib
+          fi
+
+      # 5. 上传产物 (只在文件存在时尝试)
       - name: Upload Library Artifact
+        if: hashFiles('microros_static_library_ide/lib/microros/libmicroros.a') != ''
         uses: actions/upload-artifact@v4
         with:
           name: libmicroros_hard_float
-          path: export/
+          path: |
+            microros_static_library_ide/lib/microros/libmicroros.a
+            microros_static_library_ide/lib/microros/include/
