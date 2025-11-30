@@ -1,12 +1,13 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v56 (绝对路径修正版 - The Final Corrected)
+# 描述: v55 (RMW 强制指定版)
 #
-# 1. 编译胜利: 继承 v54 的所有编译修复 (编译已通过 Summary: 70 packages finished)。
-# 2. 合并修复: 增加 library merge 步骤，将分散的 .a 文件合并为 libmicroros.a。
-# 3. 路径修复: 
-#    - 在脚本开头定义 PROJECT_ROOT=$(pwd)。
-#    - 创建 export 目录时使用 $PROJECT_ROOT/export，确保它位于仓库最顶层。
-#    - 这样 actions/upload-artifact 才能正确找到文件。
+# 1. 继承: 保留所有之前的有效修复 (rcutils/client核平, Python/FastRTPS屏蔽, 深度清理)。
+# 2. 新增修复: 解决 rmw_implementation 寻找 FastRTPS 失败的问题。
+#    原因: 即使我们指定了 RMW_IMPLEMENTATION，构建脚本依然会尝试查找默认的 FastRTPS (REQUIRED)。
+#    当我们屏蔽 FastRTPS 时，REQUIRED 检查导致报错。
+# 3. 解决方案: 直接修改 rmw_implementation 的 CMake 逻辑。
+#    强制将 get_default_rmw_implementation.cmake 中的逻辑短路，直接返回 rmw_microxrcedds。
+#    这避免了它去寻找 FastRTPS。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -35,10 +36,6 @@ jobs:
       - name: Create, Build and Package micro-ROS
         shell: bash
         run: |
-          # 【路径锚点】锁定当前绝对路径 (仓库根目录)
-          PROJECT_ROOT=$(pwd)
-          echo "DIAGNOSTIC: Project Root identified as: $PROJECT_ROOT"
-
           source /opt/ros/humble/setup.bash
 
           echo "::group::1. Prepare and build the micro_ros_setup tool"
@@ -72,12 +69,11 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS  "-Wl,--gc-sections" CACHE INTERNAL "")
           ' > ${TOOLCHAIN_PATH}
           
-          # 进入固件工作空间
           cd firmware/mcu_ws
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # STRATEGY 0: RCUTILS REPAIR
+          # STRATEGY 0: RCUTILS REPAIR (保持不变)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -88,7 +84,7 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT REPAIR
+          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT REPAIR (保持不变)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
           XRCE_TRANSPORT_H="${XRCE_CLIENT_PATH}/include/uxr/client/transport.h"
@@ -118,6 +114,26 @@ jobs:
           sed -i 's/if(.*UCLIENT_PROFILE_CUSTOM_TRANSPORT.*)/if(ON)/g' ${XRCE_CMAKE_FILE}
 
           # ====================================================================
+          # STRATEGY 2: RMW IMPLEMENTATION FIX (新增修复)
+          # ====================================================================
+          # 目标: 篡改 get_default_rmw_implementation.cmake
+          # 路径: ros2/rmw_implementation/rmw_implementation_cmake/cmake/get_default_rmw_implementation.cmake
+          
+          RMW_CMAKE_FILE="ros2/rmw_implementation/rmw_implementation_cmake/cmake/get_default_rmw_implementation.cmake"
+          echo "DIAGNOSTIC: Hijacking RMW detection logic in ${RMW_CMAKE_FILE}..."
+          
+          # 我们直接重写这个文件，让它只返回 rmw_microxrcedds
+          # 这样它就不会去 check FastRTPS 是否存在了
+          echo '
+          function(get_default_rmw_implementation _ret_var)
+            set(${_ret_var} "rmw_microxrcedds" PARENT_SCOPE)
+          endfunction()
+          ' > ${RMW_CMAKE_FILE}
+          
+          echo "DIAGNOSTIC: RMW logic hijacked. Content preview:"
+          cat ${RMW_CMAKE_FILE}
+
+          # ====================================================================
           # STRATEGY 4: DEEP CLEAN
           # ====================================================================
           echo "DIAGNOSTIC: 🔥 Performing DEEP CLEAN..."
@@ -130,6 +146,8 @@ jobs:
           # BUILD
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
+          
+          # 依然保持屏蔽，以防万一
           
           colcon build \
             --merge-install \
@@ -150,6 +168,7 @@ jobs:
               -DRCUTILS_NO_FILESYSTEM=ON \
               -DUCLIENT_CUSTOM_TRANSPORT_MTU=512 \
               -DRMW_UXRCE_TRANSPORT=custom \
+              -DRMW_IMPLEMENTATION=rmw_microxrcedds \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_c=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_cpp=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_generator_py=ON \
@@ -160,43 +179,41 @@ jobs:
               --no-warn-unused-cli
           
           echo "::endgroup::"
-
+          
           # ====================================================================
-          # MERGE & PACKAGE (使用绝对路径)
+          # MERGE LIBRARIES (关键步骤)
           # ====================================================================
+          # 之前的 v55 脚本中已经包含了合并逻辑，这里必须加上
           echo "::group::4. Merge and Package Artifacts"
           
-          # 1. 在根目录创建 export 文件夹 (使用 absolute path)
-          mkdir -p "$PROJECT_ROOT/export/lib"
-          mkdir -p "$PROJECT_ROOT/export/include"
+          # 1. 准备导出目录
+          cd ../.. 
+          mkdir -p export/lib
+          mkdir -p export/include
           
-          # 2. 检查安装目录 (install/lib 包含所有生成的 .a)
-          # 注意：我们现在还在 firmware/mcu_ws 目录下
-          if [ ! -d "install/lib" ]; then
-             echo "DIAGNOSTIC: ❌ FATAL: install/lib not found! Build likely failed."
-             ls -R
+          # 2. 进入安装目录
+          INSTALL_LIB_DIR="firmware/mcu_ws/install/lib"
+          if [ ! -d "$INSTALL_LIB_DIR" ]; then
+             echo "DIAGNOSTIC: ❌ FATAL: Install directory not found!"
              exit 1
           fi
           
-          # 3. 进入 install/lib 进行合并
-          cd install/lib
+          cd "$INSTALL_LIB_DIR"
           echo "DIAGNOSTIC: Merging static libraries in $(pwd)..."
           
-          # 生成 MRI 脚本
+          # 3. 创建 MRI 脚本 (排除 libmicroros.a 自身以防重入)
           echo "create libmicroros.a" > lib.mri
           find . -maxdepth 1 -name "*.a" -print0 | while IFS= read -r -d '' file; do
               if [ "$file" != "./libmicroros.a" ]; then
                   echo "addlib $file" >> lib.mri
-                  echo "  -> Merging $file"
               fi
           done
           echo "save" >> lib.mri
           echo "end" >> lib.mri
           
-          # 执行合并
+          # 4. 执行合并
           arm-none-eabi-ar -M < lib.mri
           
-          # 4. 验证与移动
           if [ -f "libmicroros.a" ]; then
              echo "DIAGNOSTIC: ✅ SUCCESS! libmicroros.a created."
              
@@ -207,15 +224,12 @@ jobs:
                 echo "DIAGNOSTIC: [WARNING] Library might be empty or invalid."
              fi
              
-             # 移动到绝对路径的 export 目录
-             cp libmicroros.a "$PROJECT_ROOT/export/lib/"
-             
-             # 拷贝头文件
-             # 假设 include 目录在 install/include
+             # 移动产物
+             mv libmicroros.a ../../../../export/lib/
              cd ../include
-             cp -r * "$PROJECT_ROOT/export/include/"
+             cp -r * ../../../../export/include/
              
-             echo "DIAGNOSTIC: Artifacts successfully packaged to $PROJECT_ROOT/export"
+             echo "DIAGNOSTIC: Artifacts packaged successfully."
           else
              echo "DIAGNOSTIC: ❌ FATAL: Failed to create libmicroros.a"
              exit 1
