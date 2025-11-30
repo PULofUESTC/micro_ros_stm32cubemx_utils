@@ -1,12 +1,13 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v49 (依赖裁剪版)
+# 描述: v50 (依赖屏蔽版)
 #
-# 1. 继承胜利: 保留 v48 对 microxrcedds_client 的完美修复 (核平策略)。
-# 2. 新增修复: 解决 "Could not find fastcdr" 错误。
-#    原因: 构建系统试图编译标准的 ROS 2 类型支持包 (rosidl_typesupport_fastrtps)，
-#    它依赖主机端的 Fast-CDR 库，这与 ARM 架构不兼容。
-# 3. 解决方案: 使用 --packages-ignore 显式排除所有依赖 Fast-RTPS/Fast-CDR 的包。
-#    micro-ROS 只需要 rosidl_typesupport_microxrcedds。
+# 1. 继承: 保留所有之前的修复 (rcutils/client 源码修改, 深度清理)。
+# 2. 新增修复: 解决 "builtin_interfaces" 编译时试图链接 Fast-CDR 的问题。
+#    原因: 系统中预装的 rosidl_typesupport_fastrtps 会自动被 find_package 找到，
+#          进而触发对 ARM 版 Fast-CDR 的查找(失败)。
+# 3. 解决方案: 使用 CMake 的 "CMAKE_DISABLE_FIND_PACKAGE_..." 变量，
+#    强制告诉构建系统：假装 rosidl_typesupport_fastrtps 不存在。
+#    这样生成消息代码时就会自动跳过 FastRTPS 后端。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -83,11 +84,15 @@ jobs:
           sed -i '/src\/env.c/d' ${RCUTILS_CMAKE_FILE}
 
           # ====================================================================
-          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT NUCLEAR OPTION (保持不变)
+          # STRATEGY 1: MICRO-XRCE-DDS-CLIENT REPAIR (保持不变)
           # ====================================================================
           XRCE_CLIENT_PATH="eProsima/Micro-XRCE-DDS-Client"
-          
-          echo "DIAGNOSTIC: Nuking unwanted transport source files..."
+          XRCE_TRANSPORT_H="${XRCE_CLIENT_PATH}/include/uxr/client/transport.h"
+          echo "DIAGNOSTIC: Sanitizing header file: ${XRCE_TRANSPORT_H}..."
+          sed -i '/include.*udp_transport.h/d' ${XRCE_TRANSPORT_H}
+          sed -i '/include.*tcp_transport.h/d' ${XRCE_TRANSPORT_H}
+          sed -i '/include.*serial_transport.h/d' ${XRCE_TRANSPORT_H}
+
           FILES_TO_NUKE=(
             "src/c/profile/transport/ip/udp/udp_transport.c"
             "src/c/profile/transport/ip/tcp/tcp_transport.c"
@@ -102,18 +107,6 @@ jobs:
             fi
           done
 
-          # ====================================================================
-          # STRATEGY 2: HEADER SANITIZATION (保持不变)
-          # ====================================================================
-          XRCE_TRANSPORT_H="${XRCE_CLIENT_PATH}/include/uxr/client/transport.h"
-          echo "DIAGNOSTIC: Sanitizing header file: ${XRCE_TRANSPORT_H}..."
-          sed -i '/include.*udp_transport.h/d' ${XRCE_TRANSPORT_H}
-          sed -i '/include.*tcp_transport.h/d' ${XRCE_TRANSPORT_H}
-          sed -i '/include.*serial_transport.h/d' ${XRCE_TRANSPORT_H}
-
-          # ====================================================================
-          # STRATEGY 3: CMAKE CONFIG (保持不变)
-          # ====================================================================
           XRCE_CMAKE_FILE="${XRCE_CLIENT_PATH}/CMakeLists.txt"
           sed -i 's/if(.*UCLIENT_PROFILE_UDP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
           sed -i 's/if(.*UCLIENT_PROFILE_TCP.*)/if(OFF)/g' ${XRCE_CMAKE_FILE}
@@ -130,12 +123,12 @@ jobs:
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # BUILD (关键变更: 排除不兼容的包)
+          # BUILD (关键变更: 禁用 FastRTPS 查找)
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
           
-          # 【重点】这里我们排除了所有 fastrtps 相关的包
-          # 因为 micro-ROS 在 MCU 上不应该链接这些庞大的 DDS 实现
+          # 【重点】使用 CMAKE_DISABLE_FIND_PACKAGE 彻底屏蔽 FastRTPS
+          # 这会迫使 rosidl_default_generators 跳过 FastRTPS 后端生成
           
           colcon build \
             --merge-install \
@@ -151,6 +144,8 @@ jobs:
               -DRCUTILS_NO_FILESYSTEM=ON \
               -DUCLIENT_CUSTOM_TRANSPORT_MTU=512 \
               -DRMW_UXRCE_TRANSPORT=custom \
+              -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_c=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_cpp=ON \
               --no-warn-unused-cli
           
           cd ../.. 
@@ -168,7 +163,6 @@ jobs:
           else
             echo "DIAGNOSTIC: ✅ SUCCESS! Found library at: $LIB_PATH"
             
-            echo "DIAGNOSTIC: 🔍 Inspecting Library Symbols..."
             if arm-none-eabi-nm "$LIB_PATH" | grep -q "T uxr_init_session"; then
                 echo "DIAGNOSTIC: ✅ [OK] uxr_init_session found."
             else
