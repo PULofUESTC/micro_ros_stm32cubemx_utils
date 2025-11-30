@@ -1,12 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v52 (纯净 C/C++ 版)
+# 描述: v53 (RMW 隔离版)
 #
-# 1. 继承: 保留之前所有修复 (rcutils/client 源码核平, FastRTPS屏蔽, Python依赖修复)。
-# 2. 新增修复: 解决 "Could NOT find PythonLibs" 错误。
-#    原因: 构建系统试图为 STM32 生成 Python 消息接口代码，这需要 Python 开发库，
-#          但在 MCU 上这是完全不需要的，且会导致交叉编译环境混乱。
-# 3. 解决方案: 使用 CMAKE_DISABLE_FIND_PACKAGE_rosidl_generator_py=ON。
-#    强制禁用 Python 代码生成器，只保留 C/C++ 接口生成。
+# 1. 继承: 保留所有之前的修复 (rcutils/client核平, FastRTPS屏蔽, Python禁用)。
+# 2. 新增修复: 解决 "rmw_implementation" 链接 FastRTPS/FastCDR 的错误。
+#    原因: 构建系统试图编译通用的 rmw_implementation 包，它默认依赖宿主机的 FastRTPS。
+#    但在 MCU 静态库场景下，我们直接静态链接 rmw_microxrcedds，不需要通用的加载器。
+# 3. 解决方案: 在 --packages-ignore 中添加 rmw_implementation 和其他标准 RMW 包。
+#    只保留 micro-ROS 必须的 rmw_microxrcedds。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -122,11 +122,12 @@ jobs:
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # BUILD (关键变更: 禁用 Python 消息生成)
+          # BUILD (依赖隔离版)
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
           
-          # 【重点】通过 CMAKE_DISABLE_FIND_PACKAGE 禁用 Python 代码生成
+          # 【重点】大幅增加忽略列表
+          # 排除所有标准 RMW 实现，只留 microxrcedds
           
           colcon build \
             --merge-install \
@@ -134,6 +135,11 @@ jobs:
               rosidl_typesupport_fastrtps_c \
               rosidl_typesupport_fastrtps_cpp \
               rosidl_typesupport_cpp \
+              rmw_implementation \
+              rmw_fastrtps_cpp \
+              rmw_fastrtps_dynamic_cpp \
+              rmw_cyclonedds_cpp \
+              rcl_logging_spdlog \
             --cmake-args \
               -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
               -DBUILD_TESTING=OFF \
