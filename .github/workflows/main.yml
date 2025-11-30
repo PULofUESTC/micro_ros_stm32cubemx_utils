@@ -1,13 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v53 (开启异常版)
+# 描述: v54 (屏蔽升级版)
 #
-# 1. 继承: 保留所有之前的修复 (rcutils/client核平, FastRTPS/Python屏蔽, 深度清理)。
-# 2. 新增修复: 解决 "error: exception handling disabled, use '-fexceptions' to enable"。
-#    原因: micro-ROS 的某些 C++ 组件 (如 rcl_interfaces) 使用了 std::vector 并包含 throw 语句。
-#          而我们之前的工具链配置强制使用了 -fno-exceptions，导致编译器拒绝编译。
-# 3. 解决方案: 在 toolchain.cmake 中移除 -fno-exceptions 标志。
-#    虽然嵌入式开发通常禁用异常，但为了兼容 ROS 2 的 C++ 模板代码，开启它是最务实的妥协。
-#    对于 STM32F405 (1MB Flash)，增加的代码体积通常是可以接受的。
+# 1. 继承: 保留 v53 所有修复 (开启异常, rcutils修复, client修复)。
+# 2. 新增修复: 解决 "rmw_implementation" 编译时的 FastCDR 依赖错误。
+#    原因: 构建系统试图编译通用的 RMW 实现层，它默认会寻找系统中的 FastRTPS。
+# 3. 解决方案: 使用 "CMAKE_DISABLE_FIND_PACKAGE" 强制屏蔽 rmw_fastrtps_cpp, 
+#    rmw_cyclonedds_cpp, 以及最关键的 rmw_dds_common (它引入了 fastcdr 依赖)。
+#    同时显式指定 -DRMW_IMPLEMENTATION=rmw_microxrcedds。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -57,7 +56,7 @@ jobs:
           TOOLCHAIN_PATH="${PWD}/firmware/stm32_hardfloat.cmake" 
           echo "DIAGNOSTIC: Creating toolchain file at: ${TOOLCHAIN_PATH}"
           
-          # 【关键修改】移除 -fno-exceptions
+          # 【v53 关键修改】移除 -fno-exceptions 以支持 C++ 异常
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -124,9 +123,12 @@ jobs:
           find . -name "CMakeFiles" -type d -exec rm -rf {} + 2>/dev/null || true
 
           # ====================================================================
-          # BUILD (开启异常版)
+          # BUILD (屏蔽升级版)
           # ====================================================================
           echo "DIAGNOSTIC: Starting Final Build..."
+          
+          # 【重点】大幅增加 CMAKE_DISABLE_FIND_PACKAGE 列表
+          # 屏蔽掉所有可能引入 FastRTPS/FastCDR 依赖的包
           
           colcon build \
             --merge-install \
@@ -134,6 +136,11 @@ jobs:
               rosidl_typesupport_fastrtps_c \
               rosidl_typesupport_fastrtps_cpp \
               rosidl_typesupport_cpp \
+              rmw_fastrtps_cpp \
+              rmw_fastrtps_dynamic_cpp \
+              rmw_cyclonedds_cpp \
+              rmw_dds_common \
+              test_msgs \
             --cmake-args \
               -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_PATH} \
               -DBUILD_TESTING=OFF \
@@ -142,9 +149,14 @@ jobs:
               -DRCUTILS_NO_FILESYSTEM=ON \
               -DUCLIENT_CUSTOM_TRANSPORT_MTU=512 \
               -DRMW_UXRCE_TRANSPORT=custom \
+              -DRMW_IMPLEMENTATION=rmw_microxrcedds \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_c=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_cpp=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_generator_py=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_rmw_fastrtps_cpp=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_rmw_fastrtps_dynamic_cpp=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_rmw_cyclonedds_cpp=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_rmw_dds_common=ON \
               --no-warn-unused-cli
           
           cd ../.. 
