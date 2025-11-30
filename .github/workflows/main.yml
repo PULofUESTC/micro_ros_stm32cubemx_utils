@@ -1,15 +1,19 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v57 (精准剪裁与复原版)
+# 描述: v58 (最终完美版)
 #
-# 1. 策略调整: 停止对 ping.c 和 time.c 的"核平"。
-#    原因: 用户需要在 STM32 中使用 uxr_ping_agent_attempts 等核心功能。
-#    注意: 用户需在 STM32 工程中提供 clock_gettime 等底层符号的 Polyfill。
+# 1. 策略调整: 
+#    - 停止对 ping.c 和 time.c 的"核平"。保留这些源码以支持 uxr_ping_agent_attempts 和 Session 时间管理。
+#    - 用户需在 STM32 工程中处理潜在的时间函数依赖 (polyfill)。
 #
-# 2. 依赖隔离: 彻底屏蔽 Introspection (自省) 包。
-#    原因: 这些包用于桌面端动态类型查询，且隐式依赖 FastRTPS。
-#    移除它们可以解决链接器报错，并确保只使用 microxrcedds 类型支持。
+# 2. 依赖隔离: 
+#    - 彻底屏蔽 rosidl_typesupport_introspection (自省) 包。
+#    - 显式指定使用 microxrcedds 类型支持。
+#    - 这解决了链接器试图链接 FastRTPS/FastCDR 的问题。
 #
-# 3. 保持: 继续使用 rcutils 五重切除、CMake 头部强制注入、Transport 头文件清洗。
+# 3. 基础保持: 
+#    - rcutils 五重切除 (保持)
+#    - RMW 逻辑篡改 (保持)
+#    - 库合并与路径修复 (保持)
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -62,7 +66,7 @@ jobs:
           TOOLCHAIN_PATH="${PWD}/firmware/stm32_hardfloat.cmake" 
           echo "DIAGNOSTIC: Creating toolchain file at: ${TOOLCHAIN_PATH}"
           
-          # 开启异常支持 (-fno-exceptions 已移除)
+          # 开启异常支持 (移除 -fno-exceptions 以兼容 C++ 代码)
           echo '# Set the target system for ARM Cortex-M4 with Hard FPU
           set(CMAKE_SYSTEM_NAME Generic)
           set(CMAKE_SYSTEM_PROCESSOR arm)
@@ -79,7 +83,7 @@ jobs:
           echo "DIAGNOSTIC: Changed directory to $(pwd)"
 
           # ====================================================================
-          # STRATEGY 0: RCUTILS REPAIR (保持五重切除)
+          # STRATEGY 0: RCUTILS REPAIR (五重切除 - 针对裸机环境)
           # ====================================================================
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying rcutils SURGICAL PATCHES..."
@@ -102,13 +106,13 @@ jobs:
           sed -i '/include.*serial_transport.h/d' ${XRCE_TRANSPORT_H}
 
           # 2. 源码核平 (精准剔除垃圾，保留核心)
-          # 【关键修改】注释掉了 time.c 和 ping.c，让它们正常编译
+          # 【关键修改】注释掉了 time.c 和 ping.c，让它们正常编译，保留功能
           FILES_TO_NUKE=(
             "src/c/profile/transport/ip/udp/udp_transport.c"
             "src/c/profile/transport/ip/tcp/tcp_transport.c"
             "src/c/profile/transport/serial/serial_transport.c"
-            # "src/c/util/time.c"  <-- 已恢复: 为了保留 session 时间逻辑
-            # "src/c/util/ping.c"  <-- 已恢复: 为了保留 uxr_ping_agent_attempts
+            # "src/c/util/time.c"  <-- 已保留: 保留 session 时间逻辑
+            # "src/c/util/ping.c"  <-- 已保留: 保留 uxr_ping_agent_attempts
           )
           echo "DIAGNOSTIC: Nuking ONLY unwanted transport source files..."
           for FILE in "${FILES_TO_NUKE[@]}"; do
@@ -138,6 +142,8 @@ jobs:
               set(${_ret_var} "rmw_microxrcedds" PARENT_SCOPE)
             endfunction()
             ' > "${RMW_CMAKE_FILE}"
+          else
+             echo "DIAGNOSTIC: [WARNING] RMW CMake file not found, skipping patch."
           fi
 
           # ====================================================================
@@ -160,7 +166,7 @@ jobs:
               rosidl_typesupport_fastrtps_c \
               rosidl_typesupport_fastrtps_cpp \
               rosidl_typesupport_cpp \
-              # 【新增】忽略自省库，防止引入 FastRTPS 依赖
+              # 【关键新增】忽略自省库，防止引入 FastRTPS 依赖
               rosidl_typesupport_introspection_c \
               rosidl_typesupport_introspection_cpp \
               # ---------------------------------------
@@ -178,12 +184,11 @@ jobs:
               -DUCLIENT_CUSTOM_TRANSPORT_MTU=512 \
               -DRMW_UXRCE_TRANSPORT=custom \
               -DRMW_IMPLEMENTATION=rmw_microxrcedds \
-              # 【新增】显式指定类型支持，防止 CMake 猜测
+              # 【关键新增】显式指定 C 类型支持为 microxrcedds，防止它去猜测
               -DROSIDL_TYPESUPPORT_C=rosidl_typesupport_microxrcedds_c \
-              -DROSIDL_TYPESUPPORT_CPP=rosidl_typesupport_microxrcedds_cpp \
-              # 屏蔽查找
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_c=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_fastrtps_cpp=ON \
+              # 【关键新增】禁用自省库查找
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_introspection_c=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_typesupport_introspection_cpp=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_rosidl_generator_py=ON \
