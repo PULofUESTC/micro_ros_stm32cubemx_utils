@@ -1,9 +1,12 @@
 # 文件名: .github/workflows/build-microros.yml
-# 描述: v29 (终极修复版 - Verified Strategy)
-#       核心策略：不再信任 CMake 参数配置，而是采用物理切除法。
-#       使用 sed 命令从 rcutils/CMakeLists.txt 中直接删除对
-#       "src/filesystem.c" 和 "src/shared_library.c" 的引用。
-#       这彻底解决了 arm-none-eabi 工具链缺失 dlfcn.h 和文件系统支持的问题。
+# 描述: v30 (三重外科手术版) - 我们的“剥洋葱”策略奏效了。
+#       v29 成功解决了 dlfcn.h 问题。现在我们要解决最后一个 POSIX 依赖：src/time_unix.c。
+#
+#       核心变更：
+#       新增 Patch 3: 物理移除 "src/time_unix.c"。
+#       原因: arm-none-eabi 工具链不支持 CLOCK_MONOTONIC 等 POSIX 时钟机制。
+#       移除此文件后，libmicroros.a 将成功编译。时间函数的具体实现将由
+#       用户的 STM32 工程在链接阶段通过 micro_ros_stm32cubemx_utils 提供。
 
 name: Build micro-ROS for Cortex-M4 Hard-Float
 
@@ -71,11 +74,21 @@ jobs:
           RCUTILS_CMAKE_FILE="uros/rcutils/CMakeLists.txt"
           echo "DIAGNOSTIC: Applying SURGICAL PATCHES to ${RCUTILS_CMAKE_FILE}..."
           
-          # 【核心操作】直接删除问题源文件
-          # 1. 删除 filesystem.c (解决文件系统依赖)
+          # --------------------------------------------------------------------
+          # 【核心修复】三重切除手术 (The Triple Bypass)
+          # --------------------------------------------------------------------
+          
+          # 手术 1: 移除 filesystem.c (解决文件系统依赖)
           sed -i '/src\/filesystem.c/d' ${RCUTILS_CMAKE_FILE}
-          # 2. 删除 shared_library.c (解决 dlfcn.h 缺失)
+
+          # 手术 2: 移除 shared_library.c (解决 dlfcn.h / 动态链接错误)
           sed -i '/src\/shared_library.c/d' ${RCUTILS_CMAKE_FILE}
+
+          # 手术 3 (v30新增): 移除 time_unix.c (解决 CLOCK_MONOTONIC / POSIX时间错误)
+          # 这是解决 "warning: implicit declaration of function clock_gettime" 的关键
+          sed -i '/src\/time_unix.c/d' ${RCUTILS_CMAKE_FILE}
+
+          # --------------------------------------------------------------------
 
           echo "DIAGNOSTIC: Verifying patches..."
           
@@ -92,6 +105,14 @@ jobs:
             echo "DIAGNOSTIC: ✅ Patch 2 applied: 'src/shared_library.c' removed."
           else
             echo "DIAGNOSTIC: ❌ CRITICAL: Failed to remove shared_library.c"
+            exit 1
+          fi
+
+          # 验证 Patch 3
+          if ! grep -q 'src/time_unix.c' "${RCUTILS_CMAKE_FILE}"; then
+            echo "DIAGNOSTIC: ✅ Patch 3 applied: 'src/time_unix.c' removed."
+          else
+            echo "DIAGNOSTIC: ❌ CRITICAL: Failed to remove time_unix.c"
             exit 1
           fi
           
@@ -117,8 +138,8 @@ jobs:
           }' > ${META_FILE_PATH}
 
           echo "DIAGNOSTIC: Starting the final build process..."
+          #  
           
-          # 【优化】显式添加 --metas colcon.meta
           colcon build \
             --metas colcon.meta \
             --merge-install \
