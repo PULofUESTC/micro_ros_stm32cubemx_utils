@@ -1,50 +1,70 @@
 name: Build micro-ROS Static Library (F405 Hard-Float)
 
 on: 
-  workflow_dispatch: # 允许手动点击按钮触发构建
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 检出 micro-ROS 官方仓库代码 (确保脚本和分支绝对正确)
+      # 1. 检出官方仓库 (确保有构建脚本)
       - name: Checkout Official Repository
         uses: actions/checkout@v4
         with:
           repository: micro-ROS/micro_ros_stm32cubemx_utils
           ref: humble
 
-      # 2. 运行 Docker 进行编译
-      # 核心：挂载目录，并传入 -f hard 参数以支持 STM32F405 的 FPU
+      # 2. 准备环境 (强制清理旧文件，防止脚本跳过编译)
+      - name: Prepare Workspace
+        run: |
+          echo "Cleaning previous builds..."
+          sudo rm -rf microros_static_library_ide/lib
+          
+          echo "Creating output directories..."
+          mkdir -p microros_static_library_ide/lib/microros
+          chmod -R 777 microros_static_library_ide
+
+      # 3. 运行 Docker 编译
+      # 注意：我们依然使用 -f hard
       - name: Build libmicroros.a using Docker
         run: |
-          # 创建输出目录结构
-          mkdir -p microros_static_library_ide/lib/microros
-          
-          # 赋予脚本执行权限，防止 Permission denied
-          chmod -R +x microros_static_library_ide/library_generation
+          echo "Starting Docker build..."
+          sudo docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
 
-          # 运行 Docker 容器
-          # -d: 下载依赖
-          # -t cortex_m4: 指定架构
-          # -f hard: 强制使用硬浮点 (解决 VFP 错误的关键!)
-          # -p host: 通用平台
-          docker run --rm -v $(pwd)/microros_static_library_ide:/project/microros_static_library microros/micro_ros_static_library_builder:humble -d -t cortex_m4 -f hard -p host
-
-          # 修复文件权限，确保 GitHub Actions 可以读取并上传
-          sudo chown -R $USER:$USER microros_static_library_ide
-
-      # 3. 验证并列出生成的文件 (调试用)
-      - name: Verify Generated Files
+      # 4. [关键步骤] 全局搜索文件
+      # 不管文件生成在哪，找出它的真实路径，并移动到标准位置
+      - name: Find and Move Artifacts
         run: |
-          echo "Checking for libmicroros.a..."
-          ls -l microros_static_library_ide/lib/microros/libmicroros.a
+          echo "Searching for libmicroros.a..."
+          # 在当前目录下查找 .a 文件
+          LIB_PATH=$(find . -name "libmicroros.a" | head -n 1)
+          
+          if [ -z "$LIB_PATH" ]; then
+            echo "❌ Error: libmicroros.a was NOT found. Build failed."
+            # 列出所有文件帮助调试
+            ls -R
+            exit 1
+          else
+            echo "✅ Found library at: $LIB_PATH"
+            # 确保目标目录存在
+            mkdir -p export/lib
+            mkdir -p export/include
+            
+            # 复制库文件
+            cp "$LIB_PATH" export/lib/
+            
+            # 查找并复制头文件 (include 文件夹)
+            # 通常 include 在库文件的旁边或者上级目录
+            INC_PATH=$(find . -type d -name "include" | grep "microros" | head -n 1)
+            if [ ! -z "$INC_PATH" ]; then
+               cp -r "$INC_PATH"/* export/include/
+               echo "✅ Found include files at: $INC_PATH"
+            fi
+          fi
 
-      # 4. 打包并上传产物
+      # 5. 上传找到的文件
       - name: Upload Library Artifact
         uses: actions/upload-artifact@v4
         with:
           name: libmicroros_hard_float
-          path: |
-            microros_static_library_ide/lib/microros/libmicroros.a
-            microros_static_library_ide/lib/microros/include/
+          path: export/
